@@ -41,6 +41,14 @@ global rltMain
 -- reference table for adaptive delta motion channels --
 deltaTable = #()
 
+-- Cached W3DMaterial plugin availability. Probed once by `rltMain open`
+-- (the rollout open handler) and, as a fallback, by cfW3DImporter on entry
+-- when the rollout has not been opened (batch path). The two material
+-- builder functions short-circuit when this is false, so a missing plugin
+-- produces a clear "falling back to Standard materials" log line instead of
+-- ~30 silent setProperty failures further down.
+global w3dMatlAvailable = undefined
+
 struct HierarchyHeader
 (
 	version,
@@ -496,7 +504,11 @@ fn ReadAnimationTimeCodedChannel fstream chunkEnd =
 	i = 1
 	while (ftell fstream < chunkEnd) do
 	(
-		tCode = ReadLong fstream #unsigned
+		-- Bit 31 of the timecode is W3D_TIMECODED_BINARY_MOVEMENT_FLAG (w3d.h):
+		-- it marks a non-interpolated key, it is NOT part of the frame number.
+		-- Left unmasked it yields keyTime ~2.1e9 and the per-frame fill loop in
+		-- the playback code effectively hangs Max.
+		tCode = bit.and (ReadLong fstream #unsigned) 0x7FFFFFFF
 		case flags of
 		(
 			0x0006: --ANIM_CHANNEL_TIMECODED_Q
@@ -1460,17 +1472,252 @@ struct RenegadeSelection
 	originBone   = false  -- true -> add a single Bone at world origin and reparent root pivots under it
 )
 
+-- ---------------------------------------------------------------------------
+-- Top-level W3DMaterial builders.
+--
+-- These used to live nested inside cfW3DImporter, hidden ~1000 lines into a
+-- 3200-line function. Pulled out so they're navigable and testable. They take
+-- the W3DMaterial-plugin availability flag explicitly (see ::w3dMatlAvailable
+-- probed in `rltMain open` / cfW3DImporter entry) rather than each setProperty
+-- being individually wrapped in `try (...) catch ()`. If the plugin isn't
+-- registered they return undefined immediately; callers already handle that.
+-- ---------------------------------------------------------------------------
+
+fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable =
+(
+	if not w3dMatlAvailable do return undefined
+	local m = undefined
+	try ( m = W3DMaterial name:matName ) catch ( m = undefined )
+	if m == undefined do return undefined
+
+	-- vertex material colors / opacity / shininess. Guarded: the stage-mapping
+	-- block below already checks vm.vmInfo != undefined, but these lines used to
+	-- dereference it unconditionally first, making that guard dead code -- a
+	-- VERTEX_MATERIAL chunk without a VERTEX_MATERIAL_INFO sub-chunk now degrades
+	-- to plugin defaults instead of throwing.
+	if vm.vmInfo != undefined do
+	(
+		setProperty m #ambientcolour vm.vmInfo.ambient
+		setProperty m #diffusecolour vm.vmInfo.diffuse
+		setProperty m #specularcolour vm.vmInfo.specular
+		setProperty m #emissivecolour vm.vmInfo.emissive
+		setProperty m #opacity vm.vmInfo.opacity
+		setProperty m #shininess vm.vmInfo.shininess
+		setProperty m #translucency vm.vmInfo.translucency
+	)
+
+	-- stage0/stage1 mapping types come from W3D vmInfo.attrs bitfield:
+	-- bits 16-23 = stage0Mapping, bits 8-15 = stage1Mapping. The mapper-args
+	-- strings live in vmArgs0/vmArgs1.
+	if vm.vmInfo != undefined do
+	(
+		local attrsVal = vm.vmInfo.attrs
+		local stage0Map = bit.and (bit.shift attrsVal -16) 0xFF
+		local stage1Map = bit.and (bit.shift attrsVal -8) 0xFF
+		setProperty m #stage0mapping stage0Map
+		setProperty m #stage1mapping stage1Map
+	)
+	if vm.vmArgs0 != undefined and vm.vmArgs0 != "" do
+		setProperty m #stage0mappingargs vm.vmArgs0
+	if vm.vmArgs1 != undefined and vm.vmArgs1 != "" do
+		setProperty m #stage1mappingargs vm.vmArgs1
+
+	-- W3D doesn't carry these; apply sensible defaults.
+	setProperty m #stage0mappinguvchannel 1
+	setProperty m #stage1mappinguvchannel 1
+	setProperty m #speculartodiffuse false
+
+	-- blend mode comes straight from the W3D shader classification
+	setProperty m #blendmode blendMode
+	setProperty m #alphatest (blendMode == 6 or blendMode == 7)
+
+	-- additive (Add): don't write to z-buffer, force alphatest off, set src/dst = One/One
+	if blendMode == 1 do
+	(
+		setProperty m #customblendwritezbuffer false
+		setProperty m #alphatest false
+		setProperty m #blendmodesrc 1  -- One
+		setProperty m #blendmodedest 1 -- One
+	)
+	-- alpha blend (5) and alpha-test+blend (7): set src/dst = SrcAlpha / OneMinusSrcAlpha
+	-- The plugin's blendmode dropdown sometimes doesn't auto-fill these; write them explicitly.
+	if (blendMode == 5) or (blendMode == 7) do
+	(
+		setProperty m #customblendwritezbuffer false
+		setProperty m #blendmodesrc 2  -- SrcAlpha
+		setProperty m #blendmodedest 5 -- OneMinusSrcAlpha
+	)
+
+	-- stage 0 texture
+	if texFile != undefined and texFile != "" do
+	(
+		setProperty m #stage0texenabled true
+		try ( setProperty m #stage0texturemap (bitmaptex filename:texFile) )
+		catch ( format "*** [buildW3DMatl] bitmaptex failed for %\n" texFile )
+		setProperty m #stage0display true -- show in viewport
+	)
+	return m
+)
+
+fn _w3dSetPassProp m baseName suffix value =
+(
+	-- Suffixed param names are only defined for the pass indices the plugin
+	-- exposes. A typo or a plugin built without pass 4 paramblocks is a real
+	-- bug, not something to silently swallow -- but we don't want one bad
+	-- param to abort the whole material build, so we catch+log per call.
+	local nm = (baseName + suffix) as Name
+	try ( setProperty m nm value )
+	catch ( format "*** [W3DMatl] setProperty % failed (value=%)\n" nm value )
+)
+
+fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable =
+(
+	-- Builds a single W3DMaterial with native multi-pass support.
+	-- Requires a max2w3d.dle build where pass 2/3/4 ParamBlock2 declarations have
+	-- suffixed param internal-names (_p2/_p3/_p4); pass 1 keeps bare names. See
+	-- src/w3dmaxtools/Source/w3dmaterial.cpp -> W3DMAT_PASS_PARAMS macro.
+	if not w3dMatlAvailable do return undefined
+	local nPasses = vmList.count
+	if nPasses < 1 or nPasses > 4 do return undefined
+	local m = undefined
+	try ( m = W3DMaterial name:matName ) catch ( m = undefined )
+	if m == undefined do return undefined
+	-- Set pass count first (lives on PassCountBlock, exposed as #passcount)
+	setProperty m #passcount nPasses
+	local suffixes = #("", "_p2", "_p3", "_p4")
+	-- Pick the best pass for viewport display.
+	-- Priority 1: stage0 mapping == UV (0). Priority 2 (tiebreaker): opaque blend mode (0).
+	-- A pass without a stage0 texture is skipped; stage1-only passes are never chosen.
+	local displayPassIdx = 0
+	local displayPassIsUV = false
+	local displayPassIsOpaque = false
+	for p = 1 to nPasses do
+	(
+		if texList[p] != undefined and texList[p] != "" do
+		(
+			local vm = vmList[p]
+			local stage0Map = 0
+			if vm.vmInfo != undefined do
+				stage0Map = bit.and (bit.shift vm.vmInfo.attrs -16) 0xFF
+			local isUV = (stage0Map == 0)
+			local isOpaque = (bmList[p] == 0)
+			local isBetter = (displayPassIdx == 0)
+			if not isBetter do
+			(
+				if isUV and not displayPassIsUV then
+					isBetter = true
+				else if isUV and displayPassIsUV and isOpaque and not displayPassIsOpaque then
+					isBetter = true
+			)
+			if isBetter do
+			(
+				displayPassIdx = p
+				displayPassIsUV = isUV
+				displayPassIsOpaque = isOpaque
+			)
+		)
+	)
+	for p = 1 to nPasses do
+	(
+		local sfx = suffixes[p]
+		local vm = vmList[p]
+		local tex0 = texList[p]
+		local tex1 = tex1List[p]
+		local blendMode = bmList[p]
+		-- vertex material colors / opacity / shininess (guarded for the same
+		-- reason as buildW3DMatl: vm.vmInfo can legitimately be absent)
+		if vm.vmInfo != undefined do
+		(
+			_w3dSetPassProp m "ambientcolour" sfx vm.vmInfo.ambient
+			_w3dSetPassProp m "diffusecolour" sfx vm.vmInfo.diffuse
+			_w3dSetPassProp m "specularcolour" sfx vm.vmInfo.specular
+			_w3dSetPassProp m "emissivecolour" sfx vm.vmInfo.emissive
+			_w3dSetPassProp m "opacity" sfx vm.vmInfo.opacity
+			_w3dSetPassProp m "shininess" sfx vm.vmInfo.shininess
+			_w3dSetPassProp m "translucency" sfx vm.vmInfo.translucency
+		)
+		if vm.vmInfo != undefined do
+		(
+			local attrsVal = vm.vmInfo.attrs
+			local stage0Map = bit.and (bit.shift attrsVal -16) 0xFF
+			local stage1Map = bit.and (bit.shift attrsVal -8) 0xFF
+			_w3dSetPassProp m "stage0mapping" sfx stage0Map
+			_w3dSetPassProp m "stage1mapping" sfx stage1Map
+		)
+		if vm.vmArgs0 != undefined and vm.vmArgs0 != "" do
+			_w3dSetPassProp m "stage0mappingargs" sfx vm.vmArgs0
+		if vm.vmArgs1 != undefined and vm.vmArgs1 != "" do
+			_w3dSetPassProp m "stage1mappingargs" sfx vm.vmArgs1
+		_w3dSetPassProp m "stage0mappinguvchannel" sfx 1
+		_w3dSetPassProp m "stage1mappinguvchannel" sfx 1
+		_w3dSetPassProp m "speculartodiffuse" sfx false
+		_w3dSetPassProp m "blendmode" sfx blendMode
+		_w3dSetPassProp m "alphatest" sfx (blendMode == 6 or blendMode == 7)
+		if blendMode == 1 do
+		(
+			_w3dSetPassProp m "customblendwritezbuffer" sfx false
+			_w3dSetPassProp m "alphatest" sfx false
+			_w3dSetPassProp m "blendmodesrc" sfx 1
+			_w3dSetPassProp m "blendmodedest" sfx 1
+		)
+		if (blendMode == 5) or (blendMode == 7) do
+		(
+			_w3dSetPassProp m "customblendwritezbuffer" sfx false
+			_w3dSetPassProp m "blendmodesrc" sfx 2
+			_w3dSetPassProp m "blendmodedest" sfx 5
+		)
+		if tex0 != undefined and tex0 != "" do
+		(
+			_w3dSetPassProp m "stage0texenabled" sfx true
+			try ( _w3dSetPassProp m "stage0texturemap" sfx (bitmaptex filename:tex0) )
+			catch ( format "*** [buildMultiPassW3DMatl] bitmaptex failed for stage0 %\n" tex0 )
+			if p == displayPassIdx do
+				_w3dSetPassProp m "stage0display" sfx true
+		)
+		if tex1 != undefined and tex1 != "" do
+		(
+			_w3dSetPassProp m "stage1texenabled" sfx true
+			try ( _w3dSetPassProp m "stage1texturemap" sfx (bitmaptex filename:tex1) )
+			catch ( format "*** [buildMultiPassW3DMatl] bitmaptex failed for stage1 %\n" tex1 )
+		)
+	)
+	format "    [buildMultiPassW3DMatl] OK matName=% nPasses=%\n" matName nPasses
+	return m
+)
+
 function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput useW3DMatl ignoreErrors fixNormals tga2dds fixVertices noMultiMat tga2ddsRev useWWSkin externalSkelFile importExtendedW3D rnSelection:undefined =
 (
 	-- Bump this when editing the script so you can confirm Max is running the expected copy.
 	-- Bump alongside any non-trivial logic change so the debug log makes the loaded version obvious.
-	local importerVersion = "v20"
+	local importerVersion = "v21"
 	if debugOutput do
 	(
 		format "=================================================\n"
 		format " w3dimporter % loaded from script\n" importerVersion
 		format " CABAL: initializing %\n" (bit.intAsHex (random 0 0x7FFFFFFF))
 		format "=================================================\n"
+	)
+
+	-- Fallback W3DMaterial-plugin probe for the batch / no-rollout path.
+	-- The rltMain open handler normally writes ::w3dMatlAvailable when the UI
+	-- is shown, but batch callers can reach cfW3DImporter without ever opening
+	-- the dialog. Probe once here so the material builders below can rely on
+	-- the flag being a bool rather than undefined.
+	if ::w3dMatlAvailable == undefined do
+	(
+		::w3dMatlAvailable = false
+		try
+		(
+			local probe = W3DMaterial()
+			if probe != undefined do ::w3dMatlAvailable = true
+		)
+		catch ( ::w3dMatlAvailable = false )
+		if debugOutput do format " W3DMaterial plugin available: %\n" ::w3dMatlAvailable
+	)
+	if useW3DMatl and not ::w3dMatlAvailable do
+	(
+		format "*** W3DMaterial plugin not installed -- falling back to Standard materials.\n"
+		useW3DMatl = false
 	)
 
 	-- for the interface in future version
@@ -1492,7 +1739,6 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 	global gmMeshes = #()
 
 	global depStacks = #()
-	global wwBinding = true
 
 	global maxBinding = false
 	global wwBinding = false
@@ -1560,6 +1806,15 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 	if w3dfilename != undefined then
 	(
 		fstream = fopen w3dfilename "rb"  ---binary
+		if fstream == undefined then
+		(
+			messageBox ("Could not open W3D file:\n" + w3dfilename) title:"W3D import" beep:true
+			return undefined
+		)
+		-- Guarantee fclose on a parse exception. Without this, a corrupt chunk
+		-- leaks the handle and Max keeps the .w3d locked until restart.
+		try
+		(
 		fseek fstream 0 #seek_end
 		filesize = ftell fstream
 		fseek fstream 0 #seek_set
@@ -1643,7 +1898,15 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 			--print (bit.intAsHex (ftell fstream))
 			------ debug end ------
 		)
-		fclose fstream
+		)
+		catch
+		(
+			fclose fstream
+			fstream = undefined
+			format "*** W3D parse failed for %; closing handle and rethrowing.\n" w3dfilename
+			throw()
+		)
+		if fstream != undefined do fclose fstream
 
 		-- HLOD header carries the name of the rig the meshes were authored
 		-- against. We only treat it as "needs an external skeleton" when:
@@ -1707,6 +1970,14 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 		if skelfilename != undefined then
 		(
 			fstream = fopen skelfilename "rb"  -- binary
+			if fstream == undefined then
+			(
+				messageBox ("Could not open skeleton W3D:\n" + skelfilename) title:"W3D import" beep:true
+			)
+			else
+			(
+			try
+			(
 			fseek fstream 0 #seek_end
 			local filesize = ftell fstream
 
@@ -1724,10 +1995,19 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 					( fseek fstream chunkSize #seek_cur )
 				)
 			)
-			fclose fstream
+			)
+			catch
+			(
+				fclose fstream
+				fstream = undefined
+				format "*** Skeleton W3D parse failed for %; closing handle and rethrowing.\n" skelfilename
+				throw()
+			)
+			if fstream != undefined do fclose fstream
 			-- Remember which skeleton file backed this import; the batch tools
 			-- key off this so the user doesn't get asked again.
 			lastUsedSkeletonFile = skelfilename
+			)
 		)
 
 		-- Whenever the HLOD header names an external rig, surface it to the
@@ -1828,13 +2108,18 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 						if b > 0 and b < hier.pivots.count do _keepBone[b] = true
 					)
 				)
-				-- Rigid mesh: header.boneIndex points to the pivot the mesh
-				-- attaches to (no per-vert influences). Keep that pivot too.
-				if meshes[mi].header != undefined and \
-					(isProperty meshes[mi].header #boneIndex) and \
-					meshes[mi].header.boneIndex > 0 and \
-					meshes[mi].header.boneIndex < hier.pivots.count do
-					_keepBone[meshes[mi].header.boneIndex] = true
+				-- Rigid mesh: the attach pivot comes from the HLOD sub-object's
+				-- pivotIndex (W3dMeshHeader has no bone field -- the previous
+				-- isProperty #boneIndex check was dead code, so DepBones pruned
+				-- the very pivot a non-skinned mesh parents to and the mesh
+				-- imported unplaced at the origin). Keep that pivot too.
+				if hlodSet != undefined do
+				(
+					local _hlodObj = GetHLodObject _mfn
+					if _hlodObj != undefined and _hlodObj.pivotIndex > 0 and \
+						_hlodObj.pivotIndex < hier.pivots.count do
+						_keepBone[_hlodObj.pivotIndex] = true
+				)
 			)
 			-- Close under parent ancestry: a kept bone's parents must be kept
 			-- too, otherwise the scene-graph parenting breaks.
@@ -2409,193 +2694,9 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 					return picked
 				)
 
-				-- Build a single multi-pass W3DMaterial using the plugin's native pass blocks
-				-- (passcountblock + passone/passtwo/passthree/passfour). Each pass holds its own
-				-- vertex material, shader-derived blendmode, stage 0 texture and (optional) stage 1
-				-- texture. Returns the W3DMaterial on success, undefined if the plugin doesn't expose
-				-- the per-pass blocks (e.g. older builds where only PassOne is writable from MAXScript).
-				--
-				-- The per-pass property writes are inlined (not factored into a helper fn) because
-				-- MAXScript disallows local fn cross-references inside the importer's outer fn.
-				fn buildMultiPassW3DMatl matName vmList texList tex1List bmList =
-				(
-					-- Builds a single W3DMaterial with native multi-pass support.
-					-- Requires a max2w3d.dle build where pass 2/3/4 ParamBlock2 declarations have
-					-- suffixed param internal-names (_p2/_p3/_p4); pass 1 keeps bare names. See
-					-- src/w3dmaxtools/Source/w3dmaterial.cpp -> W3DMAT_PASS_PARAMS macro.
-					local nPasses = vmList.count
-					if nPasses < 1 or nPasses > 4 do return undefined
-					local m = undefined
-					try ( m = W3DMaterial name:matName ) catch ( m = undefined )
-					if m == undefined do return undefined
-					-- Set pass count first (lives on PassCountBlock, exposed as #passcount)
-					try ( setProperty m #passcount nPasses ) catch ()
-					local suffixes = #("", "_p2", "_p3", "_p4")
-					fn setP m baseName suffix value =
-					(
-						local nm = (baseName + suffix) as Name
-						try ( setProperty m nm value ) catch ()
-					)
-					-- Pick the best pass for viewport display.
-					-- Priority 1: stage0 mapping == UV (0). Priority 2 (tiebreaker): opaque blend mode (0).
-					-- A pass without a stage0 texture is skipped; stage1-only passes are never chosen.
-					local displayPassIdx = 0
-					local displayPassIsUV = false
-					local displayPassIsOpaque = false
-					for p = 1 to nPasses do
-					(
-						if texList[p] != undefined and texList[p] != "" do
-						(
-							local vm = vmList[p]
-							local stage0Map = 0
-							if vm.vmInfo != undefined do
-								stage0Map = bit.and (bit.shift vm.vmInfo.attrs -16) 0xFF
-							local isUV = (stage0Map == 0)
-							local isOpaque = (bmList[p] == 0)
-							local isBetter = (displayPassIdx == 0)
-							if not isBetter do
-							(
-								if isUV and not displayPassIsUV then
-									isBetter = true
-								else if isUV and displayPassIsUV and isOpaque and not displayPassIsOpaque then
-									isBetter = true
-							)
-							if isBetter do
-							(
-								displayPassIdx = p
-								displayPassIsUV = isUV
-								displayPassIsOpaque = isOpaque
-							)
-						)
-					)
-					for p = 1 to nPasses do
-					(
-						local sfx = suffixes[p]
-						local vm = vmList[p]
-						local tex0 = texList[p]
-						local tex1 = tex1List[p]
-						local blendMode = bmList[p]
-						-- vertex material colors / opacity / shininess
-						setP m "ambientcolour" sfx vm.vmInfo.ambient
-						setP m "diffusecolour" sfx vm.vmInfo.diffuse
-						setP m "specularcolour" sfx vm.vmInfo.specular
-						setP m "emissivecolour" sfx vm.vmInfo.emissive
-						setP m "opacity" sfx vm.vmInfo.opacity
-						setP m "shininess" sfx vm.vmInfo.shininess
-						setP m "translucency" sfx vm.vmInfo.translucency
-						if vm.vmInfo != undefined do
-						(
-							local attrsVal = vm.vmInfo.attrs
-							local stage0Map = bit.and (bit.shift attrsVal -16) 0xFF
-							local stage1Map = bit.and (bit.shift attrsVal -8) 0xFF
-							setP m "stage0mapping" sfx stage0Map
-							setP m "stage1mapping" sfx stage1Map
-						)
-						if vm.vmArgs0 != undefined and vm.vmArgs0 != "" do
-							setP m "stage0mappingargs" sfx vm.vmArgs0
-						if vm.vmArgs1 != undefined and vm.vmArgs1 != "" do
-							setP m "stage1mappingargs" sfx vm.vmArgs1
-						setP m "stage0mappinguvchannel" sfx 1
-						setP m "stage1mappinguvchannel" sfx 1
-						setP m "speculartodiffuse" sfx false
-						setP m "blendmode" sfx blendMode
-						setP m "alphatest" sfx (blendMode == 6 or blendMode == 7)
-						if blendMode == 1 do
-						(
-							setP m "customblendwritezbuffer" sfx false
-							setP m "alphatest" sfx false
-							setP m "blendmodesrc" sfx 1
-							setP m "blendmodedest" sfx 1
-						)
-						if (blendMode == 5) or (blendMode == 7) do
-						(
-							setP m "customblendwritezbuffer" sfx false
-							setP m "blendmodesrc" sfx 2
-							setP m "blendmodedest" sfx 5
-						)
-						if tex0 != undefined and tex0 != "" do
-						(
-							setP m "stage0texenabled" sfx true
-							setP m "stage0texturemap" sfx (bitmaptex filename:tex0)
-							if p == displayPassIdx do
-								setP m "stage0display" sfx true
-						)
-						if tex1 != undefined and tex1 != "" do
-						(
-							setP m "stage1texenabled" sfx true
-							setP m "stage1texturemap" sfx (bitmaptex filename:tex1)
-						)
-					)
-					format "    [buildMultiPassW3DMatl] OK matName=% nPasses=%\n" matName nPasses
-					return m
-				)
-
-				fn buildW3DMatl matName vm texFile blendMode =
-				(
-					local m = undefined
-					try ( m = W3DMaterial name:matName ) catch ( m = undefined )
-					if m == undefined do return undefined
-
-					-- vertex material colors / opacity / shininess
-					try ( setProperty m #ambientcolour vm.vmInfo.ambient ) catch ()
-					try ( setProperty m #diffusecolour vm.vmInfo.diffuse ) catch ()
-					try ( setProperty m #specularcolour vm.vmInfo.specular ) catch ()
-					try ( setProperty m #emissivecolour vm.vmInfo.emissive ) catch ()
-					try ( setProperty m #opacity vm.vmInfo.opacity ) catch ()
-					try ( setProperty m #shininess vm.vmInfo.shininess ) catch ()
-					try ( setProperty m #translucency vm.vmInfo.translucency ) catch ()
-
-					-- stage0/stage1 mapping types come from W3D vmInfo.attrs bitfield:
-					-- bits 16-23 = stage0Mapping, bits 8-15 = stage1Mapping. The mapper-args
-					-- strings live in vmArgs0/vmArgs1.
-					if vm.vmInfo != undefined do
-					(
-						local attrsVal = vm.vmInfo.attrs
-						local stage0Map = bit.and (bit.shift attrsVal -16) 0xFF
-						local stage1Map = bit.and (bit.shift attrsVal -8) 0xFF
-						try ( setProperty m #stage0mapping stage0Map ) catch ()
-						try ( setProperty m #stage1mapping stage1Map ) catch ()
-					)
-					if vm.vmArgs0 != undefined and vm.vmArgs0 != "" do
-					( try ( setProperty m #stage0mappingargs vm.vmArgs0 ) catch () )
-					if vm.vmArgs1 != undefined and vm.vmArgs1 != "" do
-					( try ( setProperty m #stage1mappingargs vm.vmArgs1 ) catch () )
-
-					-- W3D doesn't carry these; apply sensible defaults.
-					try ( setProperty m #stage0mappinguvchannel 1 ) catch ()
-					try ( setProperty m #stage1mappinguvchannel 1 ) catch ()
-					try ( setProperty m #speculartodiffuse false ) catch ()
-
-					-- blend mode comes straight from the W3D shader classification
-					try ( setProperty m #blendmode blendMode ) catch ()
-					try ( setProperty m #alphatest (blendMode == 6 or blendMode == 7) ) catch ()
-
-					-- additive (Add): don't write to z-buffer, force alphatest off, set src/dst = One/One
-					if blendMode == 1 do
-					(
-						try ( setProperty m #customblendwritezbuffer false ) catch ()
-						try ( setProperty m #alphatest false ) catch ()
-						try ( setProperty m #blendmodesrc 1 ) catch ()  -- One
-						try ( setProperty m #blendmodedest 1 ) catch () -- One
-					)
-					-- alpha blend (5) and alpha-test+blend (7): set src/dst = SrcAlpha / OneMinusSrcAlpha
-					-- The plugin's blendmode dropdown sometimes doesn't auto-fill these; write them explicitly.
-					if (blendMode == 5) or (blendMode == 7) do
-					(
-						try ( setProperty m #customblendwritezbuffer false ) catch ()
-						try ( setProperty m #blendmodesrc 2 ) catch ()  -- SrcAlpha
-						try ( setProperty m #blendmodedest 5 ) catch () -- OneMinusSrcAlpha
-					)
-
-					-- stage 0 texture
-					if texFile != undefined and texFile != "" do
-					(
-						try ( setProperty m #stage0texenabled true ) catch ()
-						try ( setProperty m #stage0texturemap (bitmaptex filename:texFile) ) catch ()
-						try ( setProperty m #stage0display true ) catch () -- show in viewport
-					)
-					return m
-				)
+				-- (Material builder fns buildW3DMatl / buildMultiPassW3DMatl have been
+				--  hoisted to top-level — see ~line 1482. Call sites below pass the
+				--  shared ::w3dMatlAvailable flag.)
 
 				-- Detect "single material, two texture stages" pattern:
 				-- W3D encodes this as 1 vertMatl + 1 shader + 2 textures, with the vertMatl's
@@ -2618,7 +2719,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 						-- types/args from the vertex material; we just append stage 1's texture.
 						local tex0 = meshes[i].textures[1].txFileName
 						local tex1 = meshes[i].textures[2].txFileName
-						local tsMatl = buildW3DMatl meshes[i].header.meshName tsVm tex0 meshBlendMode
+						local tsMatl = buildW3DMatl meshes[i].header.meshName tsVm tex0 meshBlendMode ::w3dMatlAvailable
 						if tsMatl != undefined do
 						(
 							try ( setProperty tsMatl #stage1texenabled true ) catch ()
@@ -2744,7 +2845,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 						local singleMatlBuilt = false
 						if useW3DMatl and mpResolved do
 						(
-							local mpW3D = buildMultiPassW3DMatl meshes[i].header.meshName mpVms mpTex0 mpTex1 mpBms
+							local mpW3D = buildMultiPassW3DMatl meshes[i].header.meshName mpVms mpTex0 mpTex1 mpBms ::w3dMatlAvailable
 							if mpW3D != undefined do
 							(
 								gmMeshes[i].material = mpW3D
@@ -2791,7 +2892,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 							local pSub = undefined
 							if useW3DMatl then
 							(
-								pSub = buildW3DMatl pName pVm pTex pBm
+								pSub = buildW3DMatl pName pVm pTex pBm ::w3dMatlAvailable
 								-- wire stage 1 texture if this pass uses two texture stages
 								if (pSub != undefined) and (pTex1 != "") do
 								(
@@ -3030,7 +3131,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 									append bBms mxBms[p]
 								)
 								local subName = meshes[i].header.meshName + "_bucket" + (b as string)
-								local sub = buildMultiPassW3DMatl subName bVms bTex0 bTex1 bBms
+								local sub = buildMultiPassW3DMatl subName bVms bTex0 bTex1 bBms ::w3dMatlAvailable
 								if sub == undefined do ( mxSubsOk = false; exit )
 								append mxSubs sub
 							)
@@ -3103,7 +3204,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 								)
 								format "  -> sub[%] tex=% picked blendmode=% (%)\n" m meshes[i].textures[m].txFileName subBlendMode subBmLabel
 							)
-							subMatl = buildW3DMatl subName curVm meshes[i].textures[m].txFileName subBlendMode
+							subMatl = buildW3DMatl subName curVm meshes[i].textures[m].txFileName subBlendMode ::w3dMatlAvailable
 						)
 
 						if subMatl == undefined then
@@ -3209,7 +3310,18 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 					-- the original node entirely. This is more reliable than mutating the
 					-- original via meshOp.deleteFaces, which corrupts the TVFace/normal arrays
 					-- and triggers "TVFace index out of range" errors downstream.
-					if noMultiMat do
+					-- Skip skinned meshes: the split rebuilds geometry with new vertex
+					-- numbering, but vertInfs (the influenced-verts fix-up below and the
+					-- skin-binding passes after the loop) address the ORIGINAL vertex
+					-- indices -- setVert would run past the split node's vert count and
+					-- weights would land on the wrong verts. Skinning is the
+					-- higher-priority feature, same call as Fix Vertices makes.
+					if noMultiMat and meshes[i].vertInfs != undefined do
+					(
+						if debugOutput do
+							format "  -> No Multi-Mat: [%] is skinned; split skipped (weights address original verts)\n" gmMeshes[i].name
+					)
+					if noMultiMat and meshes[i].vertInfs == undefined do
 					(
 						try
 						(
@@ -3392,7 +3504,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 							local texFile = ""
 							if (meshes[i].textures != undefined) and (meshes[i].textures.count > 0) do
 							( texFile = meshes[i].textures[1].txFileName )
-							gmMatl = buildW3DMatl matlName meshes[i].vertMatls[1] texFile meshBlendMode
+							gmMatl = buildW3DMatl matlName meshes[i].vertMatls[1] texFile meshBlendMode ::w3dMatlAvailable
 						)
 
 						if gmMatl != undefined then
@@ -3554,7 +3666,10 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 				for p = 1 to hier.pivots.count do
 				(
 					ivs = #()
-					for v = 1 to (meshes[i].vertInfs.boneIds1.count - 1) do
+					-- was `count - 1`: an off-by-one that silently dropped the last
+					-- vertex from every bone's dependency set (and from the
+					-- Split-by-dependencies detach below)
+					for v = 1 to meshes[i].vertInfs.boneIds1.count do
 					( if meshes[i].vertInfs.boneIds1[v] == (p - 1) do (append ivs v) )
 
 					if splitMeshes do
@@ -4270,6 +4385,10 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 		(
 			for m = 1 to meshes.count do
 			(
+				-- gmMeshes has undefined holes whenever mesh creation was skipped
+				-- (Renegade subset/LOD filter, bonesOnly, ESC abort) -- binding an
+				-- undefined node throws, so skip those slots.
+				if gmMeshes[m] == undefined do continue
 				if (meshes[m].vertInfs != undefined) do
 				(
 					--convertTo gmMeshes[m] Editable_Poly
@@ -4319,6 +4438,8 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 		(
 			for m = 1 to meshes.count do
 			(
+				-- Same undefined-hole guard as the wwBinding loop above.
+				if gmMeshes[m] == undefined do continue
 				if (meshes[m].vertInfs != undefined) do
 				(
 					local currSkin = skin()
@@ -4328,26 +4449,43 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 					setCommandPanelTaskMode #modify
 					modPanel.setCurrentObject currSkin ui:true
 
+					-- DepBones leaves undefined gaps in gmPivots, and Skin's bone
+					-- indices count only the bones actually added -- so build a
+					-- pivot-ID -> skin-bone-index map while adding, instead of
+					-- assuming pivot ID p lands at skin index p. (With no gaps the
+					-- map is the identity, preserving the original behaviour.)
+					local skinIxOfPivot = #()
+					local addedBones = 0
 					for p = 1 to gmPivots.count do
-					( skinOps.addBone currSkin gmPivots[p] 0 ) --0 for no redrawing
+					(
+						if gmPivots[p] != undefined then
+						(
+							skinOps.addBone currSkin gmPivots[p] 0 --0 for no redrawing
+							addedBones += 1
+							skinIxOfPivot[p] = addedBones
+						)
+						else skinIxOfPivot[p] = 0
+					)
 
 					max modify mode
 					redrawViews()
 
 					for v = 1 to (meshes[m].vertInfs.boneIds1.count) do
 					(
-						if (meshes[m].vertInfs.boneIds1[v] > 0) do
+						local b1 = meshes[m].vertInfs.boneIds1[v]
+						if (b1 > 0) and (b1 <= gmPivots.count) and (skinIxOfPivot[b1] > 0) do
 						(
 							skinOps.unNormalizeVertex currSkin v false
-							skinOps.selectBone currSkin meshes[m].vertInfs.boneIds1[v]
-							skinOps.replaceVertexWeights currSkin v meshes[m].vertInfs.boneIds1[v] 1
-							skinOps.setVertexWeights currSkin v meshes[m].vertInfs.boneIds1[v] 1
+							skinOps.selectBone currSkin skinIxOfPivot[b1]
+							skinOps.replaceVertexWeights currSkin v skinIxOfPivot[b1] 1
+							skinOps.setVertexWeights currSkin v skinIxOfPivot[b1] 1
 						)
 
-						if (meshes[m].vertInfs.boneIds2[v] > 0) and (meshes[m].vertInfs.boneWgts1[v] < 100) do
+						local b2 = meshes[m].vertInfs.boneIds2[v]
+						if (b2 > 0) and (b2 <= gmPivots.count) and (skinIxOfPivot[b2] > 0) and (meshes[m].vertInfs.boneWgts1[v] < 100) do
 						(
-							skinOps.selectBone currSkin meshes[m].vertInfs.boneIds2[v]
-							skinOps.setVertexWeights currSkin v meshes[m].vertInfs.boneIds2[v] (0.01*meshes[m].vertInfs.boneWgts2[v])
+							skinOps.selectBone currSkin skinIxOfPivot[b2]
+							skinOps.setVertexWeights currSkin v skinIxOfPivot[b2] (0.01*meshes[m].vertInfs.boneWgts2[v])
 						)
 					)
 				)
@@ -4899,7 +5037,10 @@ rollout rltRenegade "W3D Importer - Advanced" width:718 height:575 silentErrors:
 		local splt   = try ( rltMain.ckbSplitDependencies.checked ) catch ( false )
 		local autoB  = try ( rltMain.rbgAutoBind.state )            catch ( 0 )
 		local ignE   = try ( not rltMain.ckbIgnoreErrors.checked )  catch ( true )
-		local extSkel = try ( if rltMain.ckbUseExternalSkel.checked then externalSkeletonFile else undefined ) catch ( undefined )
+		-- externalSkeletonFile is a rollout-LOCAL of rltMain; the bare name here
+		-- (inside rltRenegade) silently reads an unrelated undefined global and
+		-- the catch never fires. Must be qualified, same as DoSelectFromMix does.
+		local extSkel = try ( if rltMain.ckbUseExternalSkel.checked then rltMain.externalSkeletonFile else undefined ) catch ( undefined )
 
 		try ( destroyDialog rltRenegade ) catch ()
 
@@ -4977,7 +5118,10 @@ rollout rltRenegade "W3D Importer - Advanced" width:718 height:575 silentErrors:
 		local splt   = try ( rltMain.ckbSplitDependencies.checked ) catch ( false )
 		local autoB  = try ( rltMain.rbgAutoBind.state )            catch ( 0 )
 		local ignE   = try ( not rltMain.ckbIgnoreErrors.checked )  catch ( true )
-		local extSkel = try ( if rltMain.ckbUseExternalSkel.checked then externalSkeletonFile else undefined ) catch ( undefined )
+		-- externalSkeletonFile is a rollout-LOCAL of rltMain; the bare name here
+		-- (inside rltRenegade) silently reads an unrelated undefined global and
+		-- the catch never fires. Must be qualified, same as DoSelectFromMix does.
+		local extSkel = try ( if rltMain.ckbUseExternalSkel.checked then rltMain.externalSkeletonFile else undefined ) catch ( undefined )
 		try ( destroyDialog rltRenegade ) catch ()
 		local bSel   = RenegadeSelection meshes:#() proxies:#() aggregates:#() importAnim:doAnim importBones:true bonesOnly:true lodMode:-1 animFrom:-1 animTo:-1 depBonesOnly:false originBone:ckbOriginBone.checked
 		cfW3DImporter importFile splt autoB false dbg w3dmat ignE fxN t2d fxV nmm t2dr wwsk extSkel extW3D rnSelection:bSel
@@ -5017,6 +5161,10 @@ rollout rltRenegade "W3D Importer - Advanced" width:718 height:575 silentErrors:
 			return undefined
 		)
 
+		-- Guarantee fclose on parse failure so the .w3d isn't locked for the rest
+		-- of the Max session if a malformed chunk throws below.
+		try
+		(
 		fseek fs 0 #seek_end
 		local fsize = ftell fs
 		fseek fs 0 #seek_set
@@ -5090,7 +5238,15 @@ rollout rltRenegade "W3D Importer - Advanced" width:718 height:575 silentErrors:
 				default:    ( fseek fs cSize #seek_cur )
 			)
 		)
-		fclose fs
+		)
+		catch
+		(
+			fclose fs
+			fs = undefined
+			format "*** Renegade pre-scan failed for %; closing handle and rethrowing.\n" rnFilename
+			throw()
+		)
+		if fs != undefined do fclose fs
 
 		-- build name lists from parsed data
 		if rnParsedHlod != undefined then
@@ -5199,12 +5355,9 @@ struct W3D_Importer_Init
 		UserProfiles[(12 * (profile - 1)) + fOff]
 	),
 
-	-- Convenience: read a field from the active profile.
-	fn getActive fieldName =
-	(
-		if not Initialized do init()
-		getProfileValue CurrentProfile fieldName
-	),
+	-- (getActive lives at the END of the struct: it calls init(), and MAXScript
+	-- struct methods can only reference members declared before them -- in its
+	-- old position here, init() resolved to an undefined global.)
 
 	-- Default values for the three baseline profiles, mirroring 1.16b's
 	-- ProfilesDefaults but stripped of CreateMeshesBones (export-side).
@@ -5353,6 +5506,14 @@ struct W3D_Importer_Init
 		if CurrentProfile > ProfilesList.count do CurrentProfile = 1
 
 		Initialized = true
+	),
+
+	-- Convenience: read a field from the active profile. Defined after init()
+	-- on purpose -- see the note at its former location above.
+	fn getActive fieldName =
+	(
+		if not Initialized do init()
+		getProfileValue CurrentProfile fieldName
 	)
 )
 
@@ -5728,9 +5889,10 @@ struct Mix_File
 )
 
 -- Extract one entry from a mix to a temp file. Returns the temp path on
--- success, undefined on failure. We chunk the copy in 64 KiB blocks so the
--- byte-by-byte readByte loop doesn't stall on multi-MB W3Ds (a 5 MB asset
--- would be ~5 million MAXScript calls otherwise).
+-- success, undefined on failure. NOTE: MAXScript file streams have no bulk
+-- binary copy, so this is unavoidably one ReadByte/WriteByte pair per byte
+-- (a 5 MB asset = ~10 million MAXScript calls; expect a few seconds). A
+-- dotNet FileStream would be faster, but the importer is kept dotNet-free.
 fn ExtractMixEntry mixPath entryName outPath =
 (
 	local mixStream = fopen mixPath "rb"
@@ -5746,14 +5908,7 @@ fn ExtractMixEntry mixPath entryName outPath =
 	local out = fopen outPath "wb"
 	if out == undefined do ( fclose mixStream; return undefined )
 
-	local remaining = mf.MixFileSize
-	local blockSize = 65536
-	while remaining > 0 do
-	(
-		local n = if remaining < blockSize then remaining else blockSize
-		for i = 1 to n do WriteByte out (ReadByte mixStream #unsigned)
-		remaining -= n
-	)
+	for i = 1 to mf.MixFileSize do WriteByte out (ReadByte mixStream #unsigned)
 	fclose out
 	fclose mixStream
 	outPath
@@ -5937,27 +6092,13 @@ rcMenu rltMainMenu
 	)
 	on mi_w3d picked do
 	(
-		-- Mirror the non-batch branch of btnW3DImporter so the menu entry behaves
-		-- identically to the "Import a file" button (lets the user pick a single
-		-- .w3d via the standard file dialog).
-		try ( rltMain.btnW3DImporter.pressed() ) catch
-		(
-			-- Fallback: snapshot settings and call directly. Reachable only if the
-			-- rollout's button event-firing API isn't available on this Max version.
-			local splt   = try ( rltMain.ckbSplitDependencies.checked ) catch ( false )
-			local autoB  = try ( rltMain.rbgAutoBind.state )            catch ( 0 )
-			local dbg    = try ( rltMain.ckbDebugOutput.checked )       catch ( false )
-			local w3dmat = try ( rltMain.ckbUseW3DMatl.checked )        catch ( false )
-			local ignE   = try ( not rltMain.ckbIgnoreErrors.checked )  catch ( true )
-			local fxN    = try ( rltMain.ckbFixNormals.checked )        catch ( false )
-			local t2d    = try ( rltMain.ckbTga2Dds.checked )           catch ( false )
-			local fxV    = try ( rltMain.ckbFixVertices.checked )       catch ( false )
-			local nmm    = try ( rltMain.ckbNoMultiMat.checked )        catch ( false )
-			local t2dr   = try ( rltMain.ckbTga2DdsRev.checked )        catch ( false )
-			local wwsk   = try ( rltMain.ckbUseWWSkin.checked )         catch ( false )
-			local extW3D = try ( rltMain.ckbImportExtendedW3D.checked ) catch ( false )
-			cfW3DImporter undefined splt autoB false dbg w3dmat ignE fxN t2d fxV nmm t2dr wwsk undefined extW3D
-		)
+		-- Run the exact same code path as the "Import a file" button (incl. batch
+		-- mode and the external-skeleton pick). The previous version invoked
+		-- rltMain.btnW3DImporter.pressed() inside a try with a full re-import in
+		-- the catch -- meaning any error thrown MID-IMPORT (e.g. a corrupt file)
+		-- triggered a complete second import. No try here on purpose: a genuine
+		-- import error should surface once, not re-run.
+		rltMain.doImportPressed()
 	)
 	on mi_mix picked do DoSelectFromMix()
 	on mi_prefs picked do W3DPreferences.Open (try (getDialogPos rltMain) catch ([100,100]))
@@ -6020,7 +6161,11 @@ rollout rltMain "W3D Importer v20" width:177 height:314
 	-- so it survives across multiple imports without re-prompting.
 	local externalSkeletonFile = undefined
 
-	on btnW3DImporter pressed do
+	-- Shared by the Import button and the File > Select W3D menu item so both
+	-- run the exact same code path (incl. batch mode and external skeleton).
+	-- Must be defined AFTER `local externalSkeletonFile` above so the reference
+	-- binds to the rollout local, not an implicit global.
+	fn doImportPressed =
 	(
 		if ckbBatchProcessing.checked then
 		(
@@ -6035,6 +6180,8 @@ rollout rltMain "W3D Importer v20" width:177 height:314
 		else
 		( cfW3DImporter undefined ckbSplitDependencies.checked rbgAutoBind.state false ckbDebugOutput.checked ckbUseW3DMatl.checked (not ckbIgnoreErrors.checked) ckbFixNormals.checked ckbTga2Dds.checked ckbFixVertices.checked ckbNoMultiMat.checked ckbTga2DdsRev.checked ckbUseWWSkin.checked (if ckbUseExternalSkel.checked then externalSkeletonFile else undefined) ckbImportExtendedW3D.checked )
 	)
+
+	on btnW3DImporter pressed do doImportPressed()
 
 	-- enable rev only while tga2DDS is on; uncheck it when tga2DDS is turned off
 	on ckbTga2Dds changed st do
@@ -6169,15 +6316,17 @@ rollout rltMain "W3D Importer v20" width:177 height:314
 		( append deltaTable (1-sin(float(i-1)/240*90)) )
 
 		-- Detect whether the W3D Tools material plugin is registered. If not, disable the checkbox.
-		local w3dMatlAvailable = false
+		-- Writes the file-scope global ::w3dMatlAvailable so cfW3DImporter and the
+		-- material builders share the same answer without re-probing every call.
+		::w3dMatlAvailable = false
 		try
 		(
 			local probe = W3DMaterial()
-			if probe != undefined do w3dMatlAvailable = true
+			if probe != undefined do ::w3dMatlAvailable = true
 		)
-		catch ( w3dMatlAvailable = false )
-		ckbUseW3DMatl.enabled = w3dMatlAvailable
-		if not w3dMatlAvailable do
+		catch ( ::w3dMatlAvailable = false )
+		ckbUseW3DMatl.enabled = ::w3dMatlAvailable
+		if not ::w3dMatlAvailable do
 		(
 			ckbUseW3DMatl.checked = false
 			ckbUseW3DMatl.caption = "Use W3D materials (not installed)"
