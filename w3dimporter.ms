@@ -1689,7 +1689,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 (
 	-- Bump this when editing the script so you can confirm Max is running the expected copy.
 	-- Bump alongside any non-trivial logic change so the debug log makes the loaded version obvious.
-	local importerVersion = "v21.1"
+	local importerVersion = "v21.2"
 	if debugOutput do
 	(
 		format "=================================================\n"
@@ -1947,6 +1947,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 		--   2. main w3d already had a hierarchy chunk → keep it as-is
 		--   3. neither — auto-derive from hlodSet/anim/cmpAnim header, prompt if missing
 		local skelfilename = undefined
+		local _skelDeclined = false   -- user explicitly chose to import without the skeleton
 		if externalSkelFile != undefined then
 		(
 			skelfilename = externalSkelFile
@@ -1964,7 +1965,20 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 				if cmpAnim != undefined do skelfilename = (getFilenamePath w3dfilename) + cmpAnim.header.skelName + ".w3d"
 
 			if (skelfilename != undefined) and (not (doesFileExist skelfilename)) then
-				skelfilename = getOpenFileName caption:("Import Skeleton W3D: " + (getFilenameFile skelfilename)) types:"Westwood 3D (*.w3d)|*.w3d|All Files (*.*)|*.*|"
+			(
+				-- Explain the dependency BEFORE any picker appears. Previously a
+				-- bare file picker popped here with only its caption as a hint,
+				-- and the "requires a skeleton" popup fired afterwards regardless
+				-- of outcome.
+				local _skelBase = getFilenameFile skelfilename
+				if queryBox ("This model requires the skeleton file:  " + _skelBase + ".w3d\n\nIt was not found next to the model.\n\nLocate it now?  (No = import without bones/rigging)") title:"Skeleton required" beep:true then
+					skelfilename = getOpenFileName caption:("Import Skeleton W3D: " + _skelBase) types:"Westwood 3D (*.w3d)|*.w3d|All Files (*.*)|*.*|"
+				else
+				(
+					skelfilename = undefined
+					_skelDeclined = true   -- they answered the question; don't nag again below
+				)
+			)
 		)
 
 		if skelfilename != undefined then
@@ -2010,15 +2024,25 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 			)
 		)
 
-		-- Whenever the HLOD header names an external rig, surface it to the
-		-- user with the same message the V1.16 reference importer used. We
-		-- fire this regardless of whether the auto-derive step actually found
-		-- the skeleton on disk -- the import succeeds either way, but the
-		-- popup makes the dependency obvious (matches the user-visible
-		-- behaviour they asked for on infantry models, which always declare
-		-- an HTree even when the rig file is alongside).
-		if hlodHTreeName != undefined do
-			messageBox ("Meshes in this model require a skeleton file. \n\n Skeleton expected by model: " + (hlodHTreeName as string))
+		-- Skeleton outcome, surfaced sensibly. (Rework of the 1.16b-style popup
+		-- that fired unconditionally AFTER resolution: it announced a skeleton
+		-- was "required" even when one had already been auto-loaded, and in the
+		-- missing-file case the picker appeared before any explanation.)
+		--   * skeleton loaded (or embedded in the file) -> no popup; the
+		--     dependency is satisfied. Debug log records what was loaded.
+		--   * skeleton expected but still missing (declined / picker cancelled /
+		--     picked file had no HIERARCHY chunk) -> explicit warning that the
+		--     import will be unrigged, instead of silently importing boneless.
+		if hier != undefined then
+		(
+			if debugOutput and skelfilename != undefined do
+				format " skeleton loaded from: %\n" skelfilename
+		)
+		else if (not _skelDeclined) and ((hlodHTreeName != undefined) or (skelfilename != undefined)) then
+		(
+			local _expName = if hlodHTreeName != undefined then (hlodHTreeName as string) else (getFilenameFile (skelfilename as string))
+			messageBox ("No skeleton was loaded for this model.\n\nSkeleton expected by model: " + _expName + "\n\nMeshes will import without bones, rigging or bone-relative placement.") title:"Importing without skeleton" beep:true
+		)
 
 		if debugOutput do
 		(
