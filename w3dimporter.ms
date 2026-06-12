@@ -1,10 +1,15 @@
 -- w3d importer --
--- version 3.1 --
--- scripted by coolfile --
+-- scripted by coolfile (his original called itself "version 3.1") --
 -- msn: coolfile_cn@hotmail.com --
 -- edited and augmented by NDC --
 -- edited by tria --
 -- credits: Seagle & Sloth --
+
+-- Single source of truth for the importer version. Everything that displays
+-- a version reads this: the rltMain window title (set in its open handler)
+-- and the cfW3DImporter debug banner. Bump it with any non-trivial logic
+-- change so the loaded copy is identifiable from the log.
+global W3DImporterVersion = "v21.3"
 
 -- Reload helper: a runtime error inside cfW3DImporter can leave the rollout's
 -- event-handler thread stuck, making every button in the dialog unresponsive.
@@ -1687,9 +1692,8 @@ fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable
 
 function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput useW3DMatl ignoreErrors fixNormals tga2dds fixVertices noMultiMat tga2ddsRev useWWSkin externalSkelFile importExtendedW3D rnSelection:undefined =
 (
-	-- Bump this when editing the script so you can confirm Max is running the expected copy.
-	-- Bump alongside any non-trivial logic change so the debug log makes the loaded version obvious.
-	local importerVersion = "v21.2"
+	-- Version lives in the file-top global; see its comment for the bump rule.
+	local importerVersion = ::W3DImporterVersion
 	if debugOutput do
 	(
 		format "=================================================\n"
@@ -4028,24 +4032,78 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 							else
 							(
 								curObj.visibility = defVal
-								curObj.visibility.controller = On_Off()
-								prevVal = defVal
-								byteIdx = 1
-								bitIdx = 1
-								for f = curChn.firstFrame to curChn.lastFrame do
+								-- On_Off keys carry NO value: each key simply flips the
+								-- state, and accessing key properties on this controller
+								-- throws "Cannot access keys for this controller". The old
+								-- code did `curKey.value = curVal`, so this branch crashed
+								-- on the FIRST model with a non-constant visibility channel
+								-- ever imported. Re-emit the channel as toggle keys: the
+								-- controller outputs ON before its first key, so walk the
+								-- frames comparing desired state vs current toggle state and
+								-- drop a key wherever they differ. Keys go at (f + 1) to
+								-- match the motion channels' W3D->Max frame offset.
+								local visOk = true
+								try
 								(
-									curVal = bit.get (curChn.values[byteIdx]) bitIdx
-									if curVal != prevVal then
+									local ooCtrl = On_Off()
+									curObj.visibility.controller = ooCtrl
+									local ooState = true   -- On_Off output before the first key
+									if not defVal do
 									(
-										curKey = addNewKey curObj.visibility.controller f
-										curKey.value = curVal
-										prevVal = curVal
+										addNewKey ooCtrl 0
+										ooState = false
 									)
-									bitIdx += 1
-									if bitIdx > 8 then
+									byteIdx = 1
+									bitIdx = 1
+									for f = curChn.firstFrame to curChn.lastFrame do
 									(
-										byteIdx += 1
-										bitIdx = 1
+										curVal = bit.get (curChn.values[byteIdx]) bitIdx
+										if curVal != ooState then
+										(
+											addNewKey ooCtrl (f + 1)
+											ooState = curVal
+										)
+										bitIdx += 1
+										if bitIdx > 8 then
+										(
+											byteIdx += 1
+											bitIdx = 1
+										)
+									)
+								)
+								catch ( visOk = false )
+								-- Fallback: stepped float track (0/1) for Max versions that
+								-- refuse MAXScript key creation on On_Off as well. Step
+								-- tangents avoid fade ramps; the exporter samples visibility
+								-- over time, so this round-trips the same.
+								if not visOk do
+								(
+									local fc = bezier_float()
+									curObj.visibility.controller = fc
+									local k0 = addNewKey fc 0
+									k0.value = if defVal then 1.0 else 0.0
+									k0.inTangentType = #step
+									k0.outTangentType = #step
+									prevVal = defVal
+									byteIdx = 1
+									bitIdx = 1
+									for f = curChn.firstFrame to curChn.lastFrame do
+									(
+										curVal = bit.get (curChn.values[byteIdx]) bitIdx
+										if curVal != prevVal then
+										(
+											local kk = addNewKey fc (f + 1)
+											kk.value = if curVal then 1.0 else 0.0
+											kk.inTangentType = #step
+											kk.outTangentType = #step
+											prevVal = curVal
+										)
+										bitIdx += 1
+										if bitIdx > 8 then
+										(
+											byteIdx += 1
+											bitIdx = 1
+										)
 									)
 								)
 							)
@@ -6157,13 +6215,18 @@ rcMenu rltMainMenu
 )
 
 macroscript ImportW3D
-	category: "W3D Importer/Processor v20"
+	-- NOTE: macroscript category must be a string literal, so it stays
+	-- version-free on purpose -- a versioned category would orphan users'
+	-- toolbar buttons on every release.
+	category: "W3D Importer/Processor Cabal"
 	buttontext: "Import W3D"
 	tooltip: "W3D Importer"
 	icon:#("gMax",2)
 ( createDialog rltMain menu:rltMainMenu )
 
-rollout rltMain "W3D Importer v20" width:177 height:314
+-- Title is version-free here; the open handler appends ::W3DImporterVersion
+-- so the caption always matches the single version constant at file top.
+rollout rltMain "W3D Importer" width:177 height:314
 (
 	button btnW3DImporter "Import a file" pos:[25,17] width:127 height:36
 	button btnRenegade     "Advanced Import" pos:[25,57] width:127 height:18 tooltip:"Open a .w3d file in the advanced import dialog — inspect meshes, bones, aggregates and proxies, choose LODs and animation range, then import all or selected items."
@@ -6347,6 +6410,10 @@ rollout rltMain "W3D Importer v20" width:177 height:314
 
 	on rltMain open do
 	(
+		-- Window caption carries the unified version (single source of truth
+		-- at file top).
+		rltMain.title = "W3D Importer " + ::W3DImporterVersion
+
 		local i
 		deltaTable = #()
 
