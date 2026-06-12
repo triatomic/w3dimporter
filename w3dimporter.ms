@@ -1689,7 +1689,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 (
 	-- Bump this when editing the script so you can confirm Max is running the expected copy.
 	-- Bump alongside any non-trivial logic change so the debug log makes the loaded version obvious.
-	local importerVersion = "v21"
+	local importerVersion = "v21.1"
 	if debugOutput do
 	(
 		format "=================================================\n"
@@ -3745,11 +3745,27 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 					if isProperty maxPivot #sideFinSize  do maxPivot.sideFinSize  = 0
 				)
 
-				if (hier.pivots[i+1].parentID != 0) do
+				if (hier.pivots[i+1].parentID != 0) then
 				( maxPivot.parent = gmPivots[hier.pivots[i+1].parentID] )
+				else
+				(
+					-- Root pivot: inherit whatever parent the old bone had -- the
+					-- "Create Origin Bone" handle, or nothing. Without this the
+					-- replacement silently detached root bones from the Origin.
+					maxPivot.parent = gmPivots[i].parent
+				)
 
 				obsltPivot = gmPivots[i]
 				gmPivots[i] = maxPivot
+				-- `delete` unlinks the old bone's children to the world. Child
+				-- BONES recover (each is re-parented via the hier table when its
+				-- own replacement runs), but meshes parented by the HLOD pass --
+				-- and any other non-bone children -- stayed orphaned, so bone
+				-- animation stopped moving rigid meshes (vehicle turrets/wheels).
+				-- Hand all children over to the replacement bone first; same
+				-- backwards loop the HLOD mesh-swap branch uses.
+				for c = obsltPivot.children.count to 1 by -1 do
+				( obsltPivot.children[c].parent = maxPivot )
 				delete obsltPivot
 			)
 		)
