@@ -33,6 +33,11 @@ fn w3dInstallMenu =
     local mainBar = menuMan.getMainMenuBar()
     local w3dMenu = menuMan.createMenu "W3D Tools"
     local item    = menuMan.createActionItem "W3D_Importer" "W3D Tools" -- macroName, category
+    if item == undefined do
+    (
+        format "*** w3dInstallMenu: createActionItem could not resolve macro W3D_Importer (category 'W3D Tools')\n"
+        return false
+    )
     w3dMenu.addItem item -1
     local sub = menuMan.createSubMenuItem "W3D Tools" w3dMenu
     mainBar.addItem sub -1
