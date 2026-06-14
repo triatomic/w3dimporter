@@ -9,7 +9,7 @@
 -- a version reads this: the rltMain window title (set in its open handler)
 -- and the cfW3DImporter debug banner. Bump it with any non-trivial logic
 -- change so the loaded copy is identifiable from the log.
-global W3DImporterVersion = "v21.3"
+global W3DImporterVersion = "v21.4"
 
 -- Reload helper: a runtime error inside cfW3DImporter can leave the rollout's
 -- event-handler thread stuck, making every button in the dialog unresponsive.
@@ -53,6 +53,35 @@ deltaTable = #()
 -- produces a clear "falling back to Standard materials" log line instead of
 -- ~30 silent setProperty failures further down.
 global w3dMatlAvailable = undefined
+
+-- Duplicate-object name disambiguation.
+-- The W3D exporter requires every Max node to have a unique name and aborts
+-- with "duplicate names found" otherwise (w3dexport.cpp:2128). Renegade's
+-- convention for instanced/placeholder objects is a trailing "~NN": the
+-- exporter strips everything from the first '~' onward (CopyW3DName /
+-- ProxyExportTaskClass, w3dexport.cpp:9761) and re-references the base name, so
+-- "GDI SPAWNER", "GDI SPAWNER~01", "GDI SPAWNER~02" all round-trip back to the
+-- single render object "GDI SPAWNER". We keep the first occurrence bare and
+-- give each subsequent duplicate ~01, ~02, ... (2-digit minimum, growing).
+-- Comparison is case-insensitive because the exporter upper-cases W3D names,
+-- and the check is against the live scene so it also avoids colliding with
+-- nodes from a previous import in the same session.
+fn w3dUniqueNodeName baseName =
+(
+	if (getNodeByName baseName exact:true ignoreCase:true) == undefined then baseName
+	else
+	(
+		local result = baseName
+		local n = 1
+		do
+		(
+			result = baseName + "~" + (formattedPrint n format:"02d")
+			n += 1
+		)
+		while (getNodeByName result exact:true ignoreCase:true) != undefined
+		result
+	)
+)
 
 struct HierarchyHeader
 (
@@ -2388,7 +2417,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 				gmFaces[f] = meshes[i].faces[f].vertIds + 1 -- gMax array lower-limit is 1 while w3d's is 0
 
 			-- create a mesh
-			gmMeshes[i] = mesh name:meshes[i].header.meshName vertices:gmVerts faces:gmFaces
+			gmMeshes[i] = mesh name:(w3dUniqueNodeName meshes[i].header.meshName) vertices:gmVerts faces:gmFaces
 			-- Set by the No Multi-Mat splitter when it replaces gmMeshes[i] with a split node;
 			-- guards the post-material UV/normal loops that assume the original mesh size.
 			local noMultiMatHandled = false
@@ -4814,7 +4843,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 					-- renegade selection filter
 					if rnSelection != undefined and rnSelection.aggregates.count > 0 do
 						if findItem rnSelection.aggregates shortName == 0 do continue
-					local aggNode = W3DImporterInit.makeShape _aShape shortName _aSize _aColor
+					local aggNode = W3DImporterInit.makeShape _aShape (w3dUniqueNodeName shortName) _aSize _aColor
 					hide aggNode
 					try ( wwSetExportGeoFlag aggNode true ) catch ()
 					try ( wwSetExportBoneFlag aggNode false ) catch ()
@@ -4841,7 +4870,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 					-- renegade selection filter
 					if rnSelection != undefined and rnSelection.proxies.count > 0 do
 						if findItem rnSelection.proxies shortName == 0 do continue
-					local prxNode = W3DImporterInit.makeShape _pShape shortName _pSize _pColor
+					local prxNode = W3DImporterInit.makeShape _pShape (w3dUniqueNodeName shortName) _pSize _pColor
 					try ( wwSetExportGeoFlag prxNode true ) catch ()
 					try ( wwSetExportBoneFlag prxNode true ) catch ()
 					if prx.pivotIndex > 0 and prx.pivotIndex <= gmPivots.count and gmPivots[prx.pivotIndex] != undefined then
