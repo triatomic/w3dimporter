@@ -80,6 +80,11 @@ If a runtime error inside an import leaves the dialog's buttons unresponsive, ty
 
 </details>
 
+### Build system (v21.4+)
+`w3dimporter.ms` is now generated from `modules/*.ms` by `build-w3dimporter.ps1`.
+Edit modules, not the output. Install via the drag-drop `dist/w3dimporter.mzp`,
+which adds a **W3D Tools > W3D Importer** menu. See `modules/README.md`.
+
 <details id="changelog-v200-vs-v171">
 <summary><h2>Changelog (v20.0 vs v17.1)</h2></summary>
 
