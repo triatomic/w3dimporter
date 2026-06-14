@@ -1,0 +1,61 @@
+{
+  "planPath": "docs/superpowers/plans/2026-06-14-w3dimporter-modular-plugin.md",
+  "tasks": [
+    {
+      "id": 1,
+      "subject": "Task 1: Freeze legacy baseline + scaffold directories",
+      "status": "completed",
+      "description": "Archive current w3dimporter.ms byte-for-byte as legacy/w3dimporter-v21.4.ms; scaffold modules/ packaging/ tools/; add tools/check-legacy-frozen.ps1 (SHA + 250263-byte assert).\n\n```json:metadata\n{\"files\": [\"legacy/w3dimporter-v21.4.ms\", \"tools/check-legacy-frozen.ps1\"], \"verifyCommand\": \"pwsh -NoProfile -File tools/check-legacy-frozen.ps1\", \"acceptanceCriteria\": [\"legacy SHA-256 == live\", \"legacy is 250263 bytes\", \"dirs tracked\"], \"modelTier\": \"mechanical\"}\n```"
+    },
+    {
+      "id": 2,
+      "subject": "Task 2: Slice baseline into byte-exact modules 00..08",
+      "status": "completed",
+      "blockedBy": [1],
+      "description": "tools/slice-modules.ps1 raw-byte slicer cuts legacy into modules/00-header.ms(1-85) 01-structs(86-359) 02-chunkreader(360-1508) 03-materials(1509-1721) 04-import-core(1722-4920) 05-ui-renegade(4921-5408) 06-preferences(5409-5957) 07-mix(5958-6206) 08-ui-main(6207-6485); tools/check-lossless.ps1 proves concat(00..08)==legacy lines 1-6485.\n\n```json:metadata\n{\"files\": [\"tools/slice-modules.ps1\", \"tools/check-lossless.ps1\", \"modules/00-header.ms\", \"modules/01-structs.ms\", \"modules/02-chunkreader.ms\", \"modules/03-materials.ms\", \"modules/04-import-core.ms\", \"modules/05-ui-renegade.ms\", \"modules/06-preferences.ms\", \"modules/07-mix.ms\", \"modules/08-ui-main.ms\"], \"verifyCommand\": \"pwsh -NoProfile -File tools/check-lossless.ps1\", \"acceptanceCriteria\": [\"9 byte-exact slices\", \"concat(00..08) SHA == legacy lines 1-6485\", \"line counts sum to 6485\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 3,
+      "subject": "Task 3: Author 99-register.ms (macroScript + menu install)",
+      "status": "completed",
+      "blockedBy": [2],
+      "description": "modules/99-register.ms: W3DImporterInit.init() + macroScript W3D_Importer category W3D Tools (opens rltMain) + idempotent fn w3dInstallMenu (menuMan, findMenu dup-guard) called once; no auto-open; CRLF.\n\n```json:metadata\n{\"files\": [\"modules/99-register.ms\"], \"verifyCommand\": \"pwsh -NoProfile -File tools/check-build.ps1\", \"acceptanceCriteria\": [\"calls W3DImporterInit.init()\", \"macroScript opens rltMain\", \"idempotent menuMan install\", \"no auto-open\", \"CRLF\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 4,
+      "subject": "Task 4: Write build-w3dimporter.ps1 (concatenate modules)",
+      "status": "completed",
+      "blockedBy": [3],
+      "description": "build-w3dimporter.ps1: banner line + raw concat modules/*.ms (00..08 then 99) → root w3dimporter.ms, no separators; pwsh only.\n\n```json:metadata\n{\"files\": [\"build-w3dimporter.ps1\", \"w3dimporter.ms\"], \"verifyCommand\": \"pwsh -NoProfile -File build-w3dimporter.ps1\", \"acceptanceCriteria\": [\"exact banner + CRLF\", \"body == concat(00..08)+99 no extra bytes\", \"no Max needed\", \"order 00..08,99\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 5,
+      "subject": "Task 5: Regression guard — lossless + deterministic build",
+      "status": "completed",
+      "blockedBy": [4],
+      "description": "USER-ORDERED GATE — NON-SKIPPABLE. tools/check-build.ps1: (a) concat(00..08)==legacy lines 1-6485 (baseline), (b) built==banner+concat(00..08)+99 (rebuilt determinism); negative control flips a byte → FAIL → revert.\n\n```json:metadata\n{\"userGate\": true, \"tags\": [\"user-gate\"], \"requiresUserSpecification\": false, \"requireEvidenceTokens\": [[\"baseline\", \"legacyBody\"], [\"rebuilt\", \"built\"]], \"files\": [\"tools/check-build.ps1\"], \"verifyCommand\": \"pwsh -NoProfile -File tools/check-build.ps1\", \"acceptanceCriteria\": [\"concat(00..08) == legacy lines 1-6485\", \"built == banner+concat(00..08)+99\", \"guard fails on injected drift then reverts\", \"check-legacy-frozen still passes\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 6,
+      "subject": "Task 6: Package the .mzp drag-drop installer",
+      "status": "completed",
+      "blockedBy": [5],
+      "description": "packaging/mzp.run (name/version/description/copy w3dimporter.ms to $userScripts/drop w3dimporter.ms — NOT run) + packaging/pack-mzp.ps1 (build→guard→stage→Compress-Archive→rename .mzp→verify root entries) → dist/w3dimporter.mzp.\n\n```json:metadata\n{\"files\": [\"packaging/mzp.run\", \"packaging/pack-mzp.ps1\", \"dist/w3dimporter.mzp\"], \"verifyCommand\": \"pwsh -NoProfile -File packaging/pack-mzp.ps1\", \"acceptanceCriteria\": [\"mzp.run uses copy-to + drop (not run)\", \"mzp root = mzp.run + w3dimporter.ms\", \"pack rebuilds+guards first\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 7,
+      "subject": "Task 7: Manual smoke test in 3ds Max 2023 (behavior parity)",
+      "status": "pending",
+      "blockedBy": [6],
+      "description": "USER-ORDERED GATE — NON-SKIPPABLE. Manual: drag dist/w3dimporter.mzp → W3D Tools menu appears, no errors; restart → menu persists; no auto-open on load; import duplicate-object .w3d via menu == legacy result (names incl ~NN, materials, hierarchy); no new Listener errors. Capture menu screenshot + import log + node-name diff.\n\n```json:metadata\n{\"userGate\": true, \"tags\": [\"user-gate\"], \"requiresUserSpecification\": false, \"files\": [], \"verifyCommand\": \"manual: 3ds Max 2023 install + import + node-name diff (built vs legacy)\", \"acceptanceCriteria\": [\"mzp installs, menu appears, no errors\", \"menu persists across restart\", \"no auto-open on load\", \"duplicate-object .w3d imports identical to legacy\", \"no new Listener errors\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 8,
+      "subject": "Task 8: Document the modular workflow",
+      "status": "completed",
+      "blockedBy": [5],
+      "description": "modules/README.md (edit→build→guard loop, layout, 99-register launch surface, three guards) + root Readme.md build-system note (generated output, .mzp install).\n\n```json:metadata\n{\"files\": [\"modules/README.md\", \"Readme.md\"], \"verifyCommand\": \"manual read-back\", \"acceptanceCriteria\": [\"modules/README.md documents loop+layout+launch+guards\", \"root Readme.md notes generated output + .mzp install\"], \"modelTier\": \"mechanical\"}\n```"
+    }
+  ],
+  "lastUpdated": "2026-06-14"
+}
