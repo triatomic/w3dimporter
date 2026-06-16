@@ -207,7 +207,6 @@ fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable
 			catch ( format "*** [buildMultiPassW3DMatl] bitmaptex failed for stage1 %\n" tex1 )
 		)
 	)
-	format "    [buildMultiPassW3DMatl] OK matName=% nPasses=%\n" matName nPasses
 	return m
 )
 

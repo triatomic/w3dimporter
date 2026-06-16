@@ -12,6 +12,7 @@ Tested on 3ds Max 2023.
 
 - [w3dimporter](#w3dimporter)
   - [Usage](#usage)
+  - [Changelog (v21.9)](#changelog-v219)
   - [Changelog (v21.8)](#changelog-v218)
   - [Changelog (v21.7)](#changelog-v217)
   - [Changelog (v21.6)](#changelog-v216)
@@ -89,6 +90,22 @@ If a runtime error inside an import leaves the dialog's buttons unresponsive, ty
 Edit modules, not the output. Install via the drag-drop `dist/w3dimporter.mzp`,
 which adds a **W3D Tools > W3D Importer** menu. See `modules/README.md`.
 
+<details id="changelog-v219">
+<summary><h2>Changelog (v21.9)</h2></summary>
+
+### Alpha DCG now round-trips end-to-end
+
+The v21.6 limitation is resolved. Per-vertex **alpha** DCG — the `(255,255,255, a)` painted-transparency form ubiquitous in Renegade levels — now survives a full import → re-export, not just import. The blocker was never the importer; it was the shipped `max2w3d.dle` exposing only a single material pass to script. With a `max2w3d.dle` that authors all four W3DMaterial passes, importing with **Use W3D Materials** on rebuilds each alpha mesh as a two-pass material whose second pass is alpha-blended (`SrcAlpha` / `OneMinusSrcAlpha`); that pass is what makes the exporter emit the alpha DCG again. Verified on `blizzard.w3d`: all 6 DCG meshes round-trip (was 2), and each mesh's set of alpha values is identical to the source (per-mesh vertex counts differ only because the exporter splits verts at UV/normal seams, which is expected and lossless for the alpha data). Colour DCG continues to round-trip as before.
+
+Alpha round-trip **requires Use W3D Materials on** — with it off the mesh gets a single Standard-material pass, which cannot express the alpha-blended overlay, so the alpha is dropped on re-export. The importer now warns when that happens (see below).
+
+### Debug output
+
+- The multi-pass material builder no longer prints a `[buildMultiPassW3DMatl] OK …` line for every multi-pass material on a normal import; the per-pass detail still appears under **Debug Output**.
+- When a mesh carries alpha DCG but **Use W3D Materials** is off — the exact case where the alpha will be silently dropped on re-export — the importer now logs a `*** DCG: <mesh> has per-vertex ALPHA but 'Use W3D Materials' is OFF …` warning (always, not only under Debug Output), so the loss is visible instead of silent.
+
+</details>
+
 <details id="changelog-v218">
 <summary><h2>Changelog (v21.8)</h2></summary>
 
@@ -120,7 +137,7 @@ The importer previously skipped `W3D_CHUNK_DCG` (per-vertex diffuse colour / alp
 
 It is now read into the mesh model and applied to the Max vertex-colour channel. W3D stores DCG in two forms, distinguished by the exporter's per-node **VAlpha** geometry flag: as real per-vertex **colour** `(rgb, 255)`, or as per-vertex **alpha** `(255,255,255, a)` — white RGB with painted transparency, ubiquitous in Renegade levels. The importer detects which form each mesh uses and reconstructs the matching Max state: RGB into the vertex-colour channel for colour data, or grayscale alpha plus the VAlpha node flag (`wwSetVAlpha`) for alpha data, so a re-export regenerates the identical chunk. DCG is also located across **all** material passes, not just the first, since multi-pass Renegade meshes store it in a later pass.
 
-**Round-trip status:** colour DCG round-trips byte-exact. Alpha DCG is fully reconstructed on import but does **not** yet survive re-export — the meshes that use it are two-pass, and the alpha lives in the second (alpha-blended) pass that the shipped `max2w3d.dle` cannot author from script (the same PassOne-only limit as multi-pass W3DMaterial output). It will round-trip automatically once exporter multi-pass authoring lands.
+**Round-trip status:** colour DCG round-trips byte-exact. Alpha DCG is fully reconstructed on import; at the time of v21.6 it did not yet survive re-export, because the shipped `max2w3d.dle` could author only a single material pass (the same PassOne-only limit as multi-pass W3DMaterial output). That limit has since been lifted — see the [v21.9 changelog](#changelog-v219): with a multi-pass-capable `max2w3d.dle` and **Use W3D Materials** on, alpha DCG now round-trips too.
 
 </details>
 
