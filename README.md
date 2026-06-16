@@ -12,6 +12,7 @@ Tested on 3ds Max 2023.
 
 - [w3dimporter](#w3dimporter)
   - [Usage](#usage)
+  - [Changelog (v21.5)](#changelog-v215)
   - [Changelog (v20.0 vs v17.1)](#changelog-v200-vs-v171)
     - [Advanced Renegade Import dialog](#advanced-renegade-import-dialog)
     - [Preferences and named profiles](#preferences-and-named-profiles)
@@ -84,6 +85,19 @@ If a runtime error inside an import leaves the dialog's buttons unresponsive, ty
 `w3dimporter.ms` is now generated from `modules/*.ms` by `build-w3dimporter.ps1`.
 Edit modules, not the output. Install via the drag-drop `dist/w3dimporter.mzp`,
 which adds a **W3D Tools > W3D Importer** menu. See `modules/README.md`.
+
+<details id="changelog-v215">
+<summary><h2>Changelog (v21.5)</h2></summary>
+
+### Renegade level/terrain proxies no longer re-export as box meshes
+
+Re-exporting an imported Renegade level or terrain `.w3d` — one whose HLOD references base buildings as **proxies** (`MG*` / `MN*` with `_AG_n` / `_INT_N` / `_VIS` / `_VISX` suffixes, plus `WEP#*`, `REF_TIB_DUMP`) — produced a file that **crashed W3DView** on load.
+
+The importer creates a small visual marker per proxy (from the active profile's *Proxy* shape). Those markers were created with the export-geometry flag **on**, so the W3D exporter wrote each one out as a real ~1.5-unit box mesh — inflating the mesh count, colliding proxy-array names with real meshes, and duplicating proxies/bones. That malformed HLOD is what crashed W3DView.
+
+The proxy array is in fact reproduced entirely from the `~`-named proxy **pivot bones** (rebuilt from the file's `PIVOTS` chunk). The fix makes the proxy marker a Max-only visual node that does **not** export — both its export-geometry and export-bone flags are cleared — so the round-tripped HLOD matches the source file's proxy/pivot structure exactly and loads cleanly. Aggregates (a separate code path, keyed by geometry type) are unaffected.
+
+</details>
 
 <details id="changelog-v200-vs-v171">
 <summary><h2>Changelog (v20.0 vs v17.1)</h2></summary>

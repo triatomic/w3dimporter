@@ -9,7 +9,7 @@
 -- a version reads this: the rltMain window title (set in its open handler)
 -- and the cfW3DImporter debug banner. Bump it with any non-trivial logic
 -- change so the loaded copy is identifiable from the log.
-global W3DImporterVersion = "v21.4"
+global W3DImporterVersion = "v21.5"
 
 -- Reload helper: a runtime error inside cfW3DImporter can leave the rollout's
 -- event-handler thread stuck, making every button in the dialog unresponsive.
