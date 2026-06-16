@@ -295,6 +295,7 @@ rollout W3DPreferences "W3D Importer Preferences" width:418 height:425
 
 	label sizeNote "Note: Size 0 = auto-fit from imported bbox." pos:[18,270] width:380
 	button RestoreButton "Restore" pos:[329,290] width:75
+	checkbox AutoOpenCheck "Auto-open importer on Max startup" pos:[18,291] width:300 align:#left tooltip:"Off by default. When on, the importer dialog reopens automatically each time Max loads the plugin."
 
 	groupBox W3DPathGroup "Default W3D Path:" width:410 height:57 pos:[4,326]
 	dropdownlist W3DPathCombo pos:[14,347] width:310 align:#left
@@ -436,6 +437,7 @@ rollout W3DPreferences "W3D Importer Preferences" width:418 height:425
 		join W3DImporterInit.W3DPaths W3DPathCombo.items
 		W3DImporterInit.CurrentProfile = ProfileCombo.selection
 		W3DImporterInit.saveToFile()
+		setINISetting W3DImporterInit.ImporterInitFile "Startup" "AutoOpen" (if AutoOpenCheck.checked then "1" else "0")
 		ApplyButton.enabled = false
 	)
 
@@ -461,6 +463,8 @@ rollout W3DPreferences "W3D Importer Preferences" width:418 height:425
 		dShapeCombo.items = Shapes
 
 		W3DPathCombo.items = (local p = #(); join p W3DImporterInit.W3DPaths; p)
+
+		AutoOpenCheck.checked = ((getINISetting W3DImporterInit.ImporterInitFile "Startup" "AutoOpen") == "1")
 
 		UpdateProfile ProfileCombo.selection fromInit:true
 	)
@@ -516,6 +520,7 @@ rollout W3DPreferences "W3D Importer Preferences" width:418 height:425
 	on dColorPick changed val do UpdateSettings "DazzleColor" val
 
 	on RestoreButton pressed do UpdateProfile ProfileCombo.selection restore:true
+	on AutoOpenCheck changed state do ApplyButton.enabled = true
 
 	on W3DPathCombo selected val do UpdateW3DPaths val
 	on BrowseButton pressed do

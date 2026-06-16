@@ -10,7 +10,7 @@
 -- a version reads this: the rltMain window title (set in its open handler)
 -- and the cfW3DImporter debug banner. Bump it with any non-trivial logic
 -- change so the loaded copy is identifiable from the log.
-global W3DImporterVersion = "v21.6"
+global W3DImporterVersion = "v21.7"
 
 -- Reload helper: a runtime error inside cfW3DImporter can leave the rollout's
 -- event-handler thread stuck, making every button in the dialog unresponsive.
@@ -5789,6 +5789,7 @@ rollout W3DPreferences "W3D Importer Preferences" width:418 height:425
 
 	label sizeNote "Note: Size 0 = auto-fit from imported bbox." pos:[18,270] width:380
 	button RestoreButton "Restore" pos:[329,290] width:75
+	checkbox AutoOpenCheck "Auto-open importer on Max startup" pos:[18,291] width:300 align:#left tooltip:"Off by default. When on, the importer dialog reopens automatically each time Max loads the plugin."
 
 	groupBox W3DPathGroup "Default W3D Path:" width:410 height:57 pos:[4,326]
 	dropdownlist W3DPathCombo pos:[14,347] width:310 align:#left
@@ -5930,6 +5931,7 @@ rollout W3DPreferences "W3D Importer Preferences" width:418 height:425
 		join W3DImporterInit.W3DPaths W3DPathCombo.items
 		W3DImporterInit.CurrentProfile = ProfileCombo.selection
 		W3DImporterInit.saveToFile()
+		setINISetting W3DImporterInit.ImporterInitFile "Startup" "AutoOpen" (if AutoOpenCheck.checked then "1" else "0")
 		ApplyButton.enabled = false
 	)
 
@@ -5955,6 +5957,8 @@ rollout W3DPreferences "W3D Importer Preferences" width:418 height:425
 		dShapeCombo.items = Shapes
 
 		W3DPathCombo.items = (local p = #(); join p W3DImporterInit.W3DPaths; p)
+
+		AutoOpenCheck.checked = ((getINISetting W3DImporterInit.ImporterInitFile "Startup" "AutoOpen") == "1")
 
 		UpdateProfile ProfileCombo.selection fromInit:true
 	)
@@ -6010,6 +6014,7 @@ rollout W3DPreferences "W3D Importer Preferences" width:418 height:425
 	on dColorPick changed val do UpdateSettings "DazzleColor" val
 
 	on RestoreButton pressed do UpdateProfile ProfileCombo.selection restore:true
+	on AutoOpenCheck changed state do ApplyButton.enabled = true
 
 	on W3DPathCombo selected val do UpdateW3DPaths val
 	on BrowseButton pressed do
@@ -6632,6 +6637,16 @@ fn w3dMigIni = (getDir #userScripts) + "\\W3D-Importer.ini"
 fn w3dGetMigrationFlag = ( getINISetting (w3dMigIni()) "Migration" "LegacyEntry" )      -- "" when unset
 fn w3dSetMigrationFlag v = ( setINISetting (w3dMigIni()) "Migration" "LegacyEntry" v )
 
+-- --- opt-in autostart persistence (W3D-Importer.ini) -----------------------
+-- The legacy v21.4 tail auto-opened the dialog on EVERY script evaluation, which
+-- is wrong for a menu-installed plugin (it would pop up on every Max launch), so
+-- it was dropped in favour of the W3D Tools > W3D Importer menu. Users who want
+-- the old behaviour back can opt in -- via the Preferences checkbox, or
+-- `w3dSetAutoStart true` in the Listener -- and the install block below honours
+-- the flag, opening the dialog once on load (interactive sessions only).
+fn w3dGetAutoStart = ( (getINISetting (w3dMigIni()) "Startup" "AutoOpen") == "1" )
+fn w3dSetAutoStart onoff = ( setINISetting (w3dMigIni()) "Startup" "AutoOpen" (if onoff then "1" else "0") )
+
 -- Remove the legacy "Import W3D" item + its orphan macro file, remember the
 -- choice, and confirm. Called from the migration prompt's Remove button.
 fn w3dDoLegacyRemove =
@@ -6717,3 +6732,16 @@ try
     )
 )
 catch ( format "*** w3dInstallMenu failed: %\n" (getCurrentException()) )
+
+-- Opt-in autostart (off by default; see w3dGetAutoStart above). Honour the flag
+-- so an autoloaded install can reopen the dialog on launch for users who want
+-- it, without forcing it on everyone. Interactive (non-quiet) sessions only.
+try
+(
+    if (not (try (GetQuietMode()) catch (false))) and (w3dGetAutoStart()) do
+    (
+        try ( destroyDialog rltMain ) catch ()
+        createDialog rltMain menu:rltMainMenu
+    )
+)
+catch ( format "*** w3d autostart failed: %\n" (getCurrentException()) )

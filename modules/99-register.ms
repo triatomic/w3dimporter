@@ -61,6 +61,16 @@ fn w3dMigIni = (getDir #userScripts) + "\\W3D-Importer.ini"
 fn w3dGetMigrationFlag = ( getINISetting (w3dMigIni()) "Migration" "LegacyEntry" )      -- "" when unset
 fn w3dSetMigrationFlag v = ( setINISetting (w3dMigIni()) "Migration" "LegacyEntry" v )
 
+-- --- opt-in autostart persistence (W3D-Importer.ini) -----------------------
+-- The legacy v21.4 tail auto-opened the dialog on EVERY script evaluation, which
+-- is wrong for a menu-installed plugin (it would pop up on every Max launch), so
+-- it was dropped in favour of the W3D Tools > W3D Importer menu. Users who want
+-- the old behaviour back can opt in -- via the Preferences checkbox, or
+-- `w3dSetAutoStart true` in the Listener -- and the install block below honours
+-- the flag, opening the dialog once on load (interactive sessions only).
+fn w3dGetAutoStart = ( (getINISetting (w3dMigIni()) "Startup" "AutoOpen") == "1" )
+fn w3dSetAutoStart onoff = ( setINISetting (w3dMigIni()) "Startup" "AutoOpen" (if onoff then "1" else "0") )
+
 -- Remove the legacy "Import W3D" item + its orphan macro file, remember the
 -- choice, and confirm. Called from the migration prompt's Remove button.
 fn w3dDoLegacyRemove =
@@ -146,3 +156,16 @@ try
     )
 )
 catch ( format "*** w3dInstallMenu failed: %\n" (getCurrentException()) )
+
+-- Opt-in autostart (off by default; see w3dGetAutoStart above). Honour the flag
+-- so an autoloaded install can reopen the dialog on launch for users who want
+-- it, without forcing it on everyone. Interactive (non-quiet) sessions only.
+try
+(
+    if (not (try (GetQuietMode()) catch (false))) and (w3dGetAutoStart()) do
+    (
+        try ( destroyDialog rltMain ) catch ()
+        createDialog rltMain menu:rltMainMenu
+    )
+)
+catch ( format "*** w3d autostart failed: %\n" (getCurrentException()) )

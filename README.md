@@ -12,6 +12,7 @@ Tested on 3ds Max 2023.
 
 - [w3dimporter](#w3dimporter)
   - [Usage](#usage)
+  - [Changelog (v21.7)](#changelog-v217)
   - [Changelog (v21.6)](#changelog-v216)
   - [Changelog (v21.5)](#changelog-v215)
   - [Changelog (v20.0 vs v17.1)](#changelog-v200-vs-v171)
@@ -86,6 +87,17 @@ If a runtime error inside an import leaves the dialog's buttons unresponsive, ty
 `w3dimporter.ms` is now generated from `modules/*.ms` by `build-w3dimporter.ps1`.
 Edit modules, not the output. Install via the drag-drop `dist/w3dimporter.mzp`,
 which adds a **W3D Tools > W3D Importer** menu. See `modules/README.md`.
+
+<details id="changelog-v217">
+<summary><h2>Changelog (v21.7)</h2></summary>
+
+### Optional auto-open on Max startup
+
+The dialog can again open automatically when Max loads the plugin — but it is now **opt-in and off by default**, rather than the old v21.4 behaviour of force-opening on every script evaluation.
+
+The legacy auto-open tail was removed when the plugin moved to a menu install (`W3D Tools > W3D Importer`), because popping the dialog on every Max launch is wrong for a menu-installed tool. Users who preferred the old behaviour can turn it back on: tick **Auto-open importer on Max startup** in **Edit > Preferences**, or run `w3dSetAutoStart true` in the Listener. The choice persists in `W3D-Importer.ini` under `[Startup] AutoOpen`. When enabled, the install pass reopens the dialog once on load (interactive sessions only — it is suppressed in quiet / network-render mode).
+
+</details>
 
 <details id="changelog-v216">
 <summary><h2>Changelog (v21.6)</h2></summary>
