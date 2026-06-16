@@ -10,7 +10,7 @@
 -- a version reads this: the rltMain window title (set in its open handler)
 -- and the cfW3DImporter debug banner. Bump it with any non-trivial logic
 -- change so the loaded copy is identifiable from the log.
-global W3DImporterVersion = "v21.7"
+global W3DImporterVersion = "v21.8"
 
 -- Reload helper: a runtime error inside cfW3DImporter can leave the rollout's
 -- event-handler thread stuck, making every button in the dialog unresponsive.
@@ -293,7 +293,8 @@ struct W3dMesh
 	vertMatls,
 	textures,
 	matlPass,
-	matlPasses
+	matlPasses,
+	userText		-- W3D_CHUNK_MESH_USER_TEXT: MAX user-defined-properties / comment field (NULL-terminated); undefined if absent
 )
 
 struct HLodHeader
@@ -1248,6 +1249,7 @@ fn ReadMesh fstream chunkEnd =
 (
 	--bitchannels = #()
 	matlPasses = #()
+	userText = undefined	-- reset per mesh: an absent 0x0C must not inherit the previous mesh's note
 	while (ftell fstream < chunkEnd) do
 	(
 		chunkType = ReadLong fstream #unsigned
@@ -1263,7 +1265,15 @@ fn ReadMesh fstream chunkEnd =
 			(
 				normals = ReadMeshVertArray fstream subChunkEnd
 			)
-			--0x0000000C:	--W3D_CHUNK_MESH_USER_TEXT	// Text from the MAX comment field (Null terminated string)
+			0x0000000C:	--W3D_CHUNK_MESH_USER_TEXT	// Text from the MAX comment field (Null terminated string)
+			(
+				-- per-mesh authoring note (the MAX "User Defined Properties" buffer); the
+				-- exporter re-emits it verbatim from that buffer, so reading it here is all
+				-- that's needed for a round-trip. ReadString stops at the null; seek to the
+				-- chunk end so the loop resumes cleanly regardless of any trailing padding.
+				userText = ReadString fstream
+				fseek fstream subChunkEnd #seek_set
+			)
 			0x0000000E:	--W3D_CHUNK_VERTEX_INFLUENCES	--Mesh Deformation vertex connections (array of W3dVertInfStruct's)
 			(
 				vertInfs = ReadMeshVertInfs fstream subChunkEnd
@@ -1327,7 +1337,7 @@ fn ReadMesh fstream chunkEnd =
 		--print ("end: " + bit.intAsHex chunkEnd)
 		------ debug end ------
 	)
-	result = W3dMesh header verts normals vertInfs faces shadeIds matlheader shaders vertMatls textures matlPass matlPasses
+	result = W3dMesh header verts normals vertInfs faces shadeIds matlheader shaders vertMatls textures matlPass matlPasses userText
 	--return result
 )
 
@@ -3736,6 +3746,19 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 				)
 				if debugOutput do
 				( format "  DCG -> % (% verts, mode=%)\n" gmMeshes[i].name dcgCols.count (if dcgIsAlpha then "alpha" else "color") )
+			)
+
+			-- W3D_CHUNK_MESH_USER_TEXT: restore the level author's per-mesh "User Defined
+			-- Properties" note (e.g. "LVSMaterial8 = shine metal"). The exporter re-emits it
+			-- verbatim from that buffer (meshsave.cpp GetUserPropBuffer), so this round-trips
+			-- with no DLL change. Node-level metadata with no vertex dependency, so -- unlike
+			-- DCG -- it also applies on the No-Multi-Mat split path (gmMeshes[i] = representative).
+			if meshes[i].userText != undefined and meshes[i].userText != "" do
+			(
+				try ( setUserPropBuffer gmMeshes[i] meshes[i].userText )
+				catch ( format "*** setUserPropBuffer failed on %\n" gmMeshes[i].name )
+				if debugOutput do
+				( format "  UserText -> % (% chars)\n" gmMeshes[i].name meshes[i].userText.count )
 			)
 
 			-- Fix Vertices and Fix Normals were originally applied here, but they interfere

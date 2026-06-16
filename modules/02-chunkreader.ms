@@ -887,6 +887,7 @@ fn ReadMesh fstream chunkEnd =
 (
 	--bitchannels = #()
 	matlPasses = #()
+	userText = undefined	-- reset per mesh: an absent 0x0C must not inherit the previous mesh's note
 	while (ftell fstream < chunkEnd) do
 	(
 		chunkType = ReadLong fstream #unsigned
@@ -902,7 +903,15 @@ fn ReadMesh fstream chunkEnd =
 			(
 				normals = ReadMeshVertArray fstream subChunkEnd
 			)
-			--0x0000000C:	--W3D_CHUNK_MESH_USER_TEXT	// Text from the MAX comment field (Null terminated string)
+			0x0000000C:	--W3D_CHUNK_MESH_USER_TEXT	// Text from the MAX comment field (Null terminated string)
+			(
+				-- per-mesh authoring note (the MAX "User Defined Properties" buffer); the
+				-- exporter re-emits it verbatim from that buffer, so reading it here is all
+				-- that's needed for a round-trip. ReadString stops at the null; seek to the
+				-- chunk end so the loop resumes cleanly regardless of any trailing padding.
+				userText = ReadString fstream
+				fseek fstream subChunkEnd #seek_set
+			)
 			0x0000000E:	--W3D_CHUNK_VERTEX_INFLUENCES	--Mesh Deformation vertex connections (array of W3dVertInfStruct's)
 			(
 				vertInfs = ReadMeshVertInfs fstream subChunkEnd
@@ -966,7 +975,7 @@ fn ReadMesh fstream chunkEnd =
 		--print ("end: " + bit.intAsHex chunkEnd)
 		------ debug end ------
 	)
-	result = W3dMesh header verts normals vertInfs faces shadeIds matlheader shaders vertMatls textures matlPass matlPasses
+	result = W3dMesh header verts normals vertInfs faces shadeIds matlheader shaders vertMatls textures matlPass matlPasses userText
 	--return result
 )
 

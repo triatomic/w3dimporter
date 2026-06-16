@@ -12,6 +12,7 @@ Tested on 3ds Max 2023.
 
 - [w3dimporter](#w3dimporter)
   - [Usage](#usage)
+  - [Changelog (v21.8)](#changelog-v218)
   - [Changelog (v21.7)](#changelog-v217)
   - [Changelog (v21.6)](#changelog-v216)
   - [Changelog (v21.5)](#changelog-v215)
@@ -87,6 +88,17 @@ If a runtime error inside an import leaves the dialog's buttons unresponsive, ty
 `w3dimporter.ms` is now generated from `modules/*.ms` by `build-w3dimporter.ps1`.
 Edit modules, not the output. Install via the drag-drop `dist/w3dimporter.mzp`,
 which adds a **W3D Tools > W3D Importer** menu. See `modules/README.md`.
+
+<details id="changelog-v218">
+<summary><h2>Changelog (v21.8)</h2></summary>
+
+### Per-mesh user text (`W3D_CHUNK_MESH_USER_TEXT`) is now imported
+
+The importer previously skipped `W3D_CHUNK_MESH_USER_TEXT` (0x0C) — the per-mesh note taken from the node's **User Defined Properties** buffer (the old "MAX comment field") — so it was discarded on import and, having nothing left in the buffer, dropped on any re-export. Renegade level meshes use it to record what each consolidated vertex material originally was, e.g. `LVSMaterial8 = shine metal`.
+
+It is now read and written back onto the imported mesh node via `setUserPropBuffer`, which is the exact buffer the exporter reads (`GetUserPropBuffer`) — so it survives a round-trip with no exporter/DLL change. You can see it per object under **Object Properties → User Defined**, and because the text is `key = value` lines it is also queryable with `getUserProp <node> "LVSMaterial8"`. This is authoring metadata only: no runtime loader reads the chunk, so it has no effect on how meshes render in-game or in W3DView — it is purely a data-preservation fix. Meshes without a user-text chunk (e.g. collision/blocker meshes) are unaffected. Line endings are normalised by Max (`\r\n`), so the round-trip is content-faithful rather than strictly byte-identical.
+
+</details>
 
 <details id="changelog-v217">
 <summary><h2>Changelog (v21.7)</h2></summary>

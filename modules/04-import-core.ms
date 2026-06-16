@@ -1996,6 +1996,19 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 				( format "  DCG -> % (% verts, mode=%)\n" gmMeshes[i].name dcgCols.count (if dcgIsAlpha then "alpha" else "color") )
 			)
 
+			-- W3D_CHUNK_MESH_USER_TEXT: restore the level author's per-mesh "User Defined
+			-- Properties" note (e.g. "LVSMaterial8 = shine metal"). The exporter re-emits it
+			-- verbatim from that buffer (meshsave.cpp GetUserPropBuffer), so this round-trips
+			-- with no DLL change. Node-level metadata with no vertex dependency, so -- unlike
+			-- DCG -- it also applies on the No-Multi-Mat split path (gmMeshes[i] = representative).
+			if meshes[i].userText != undefined and meshes[i].userText != "" do
+			(
+				try ( setUserPropBuffer gmMeshes[i] meshes[i].userText )
+				catch ( format "*** setUserPropBuffer failed on %\n" gmMeshes[i].name )
+				if debugOutput do
+				( format "  UserText -> % (% chars)\n" gmMeshes[i].name meshes[i].userText.count )
+			)
+
 			-- Fix Vertices and Fix Normals were originally applied here, but they interfere
 			-- with the skin-binding pass that runs after this loop:
 			--   - Fix Vertices welds verts (changes vertex count) -> Skin's per-vertex

@@ -207,7 +207,8 @@ struct W3dMesh
 	vertMatls,
 	textures,
 	matlPass,
-	matlPasses
+	matlPasses,
+	userText		-- W3D_CHUNK_MESH_USER_TEXT: MAX user-defined-properties / comment field (NULL-terminated); undefined if absent
 )
 
 struct HLodHeader
