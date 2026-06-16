@@ -3745,9 +3745,10 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 					-- Alpha-mode DCG only survives re-export through a 2-pass W3DMaterial whose
 					-- second pass is alpha-blended (the exporter's IsAlpha gate). That pass is only
 					-- authored on the "Use W3D Materials" path; with it OFF the mesh gets a single
-					-- Standard-material pass and the alpha is silently dropped on export. Surface
-					-- that unconditionally so the loss isn't invisible (cf. the v21.6 DCG finding).
-					if not useW3DMatl do
+					-- Standard-material pass and the alpha is silently dropped on export. Note that
+					-- as a debug diagnostic (cf. the v21.6 DCG finding) -- gated by Debug Output like
+					-- the sibling DCG line below, so a normal import isn't spammed with it.
+					if debugOutput and not useW3DMatl do
 						format "*** DCG: % has per-vertex ALPHA but 'Use W3D Materials' is OFF -- the alpha-blend pass won't be authored, so this alpha will be LOST on re-export. Re-import with 'Use W3D Materials' ON to round-trip it.\n" gmMeshes[i].name
 				)
 				if debugOutput do
