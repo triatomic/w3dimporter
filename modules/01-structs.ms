@@ -182,7 +182,8 @@ struct W3dMeshMaterialPass
 	vmIds,
 	shaderIds,
 	textureStage,	-- legacy: first stage (== textureStages[1] when present); kept for back-compat readers
-	textureStages	-- array of W3dMeshTextureStage, one per W3D_CHUNK_TEXTURE_STAGE in this pass
+	textureStages,	-- array of W3dMeshTextureStage, one per W3D_CHUNK_TEXTURE_STAGE in this pass
+	dcg				-- W3D_CHUNK_DCG per-vertex diffuse colors (array of Max Color, one per mesh vertex); undefined if absent
 )
 
 struct W3dMeshVertInfs

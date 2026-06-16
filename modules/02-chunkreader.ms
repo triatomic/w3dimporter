@@ -806,12 +806,27 @@ fn ReadMeshTextureStage fstream chunkEnd=
 	result = W3dMeshTextureStage txIds txCoords
 )
 
+fn ReadMeshDCGArray fstream chunkEnd =
+(
+	-- per-vertex diffuse colors (W3D_CHUNK_DCG): an array of W3dRGBAStruct
+	-- (4 bytes R,G,B,A each), one entry per mesh vertex. ReadColor already reads
+	-- exactly that layout, so this mirrors ReadMeshTextureCoordArray above.
+	dcg = #()
+	while (ftell fstream < chunkEnd) do
+	( append dcg (ReadColor fstream) )
+	return dcg
+)
+
 fn ReadMeshMaterialPass fstream chunkEnd=
 (
 	-- A MATERIAL_PASS may contain multiple TEXTURE_STAGE sub-chunks (stage 0, stage 1, ...).
 	-- Collect them all; expose stages[1] as the legacy `textureStage` field for back-compat.
 	local txStages = #()
 	local txStage = undefined
+	-- per-vertex diffuse colors (W3D_CHUNK_DCG); undefined when the pass has none.
+	-- Declared local (unlike vmIds/shaderIds, which are bare) so it can never leak
+	-- a previous mesh/pass's colors into a pass that omits the chunk.
+	local dcg = undefined
 	while (ftell fstream < chunkEnd) do
 	(
 		chunkType = ReadLong fstream #unsigned
@@ -836,7 +851,11 @@ fn ReadMeshMaterialPass fstream chunkEnd=
 				subChunkEnd = (ftell fstream) + chunkSize
 				shaderIds = ReadLongArray fstream subChunkEnd
 			)
-			--0x0000003B:	--W3D_CHUNK_DCG	// per-vertex diffuse color values (array of W3dRGBAStruct's)
+			0x0000003B:	--W3D_CHUNK_DCG	// per-vertex diffuse color values (array of W3dRGBAStruct's)
+			(
+				subChunkEnd = (ftell fstream) + chunkSize
+				dcg = ReadMeshDCGArray fstream subChunkEnd
+			)
 			--0x0000003C:	--W3D_CHUNK_DIG	// per-vertex diffuse illumination values (array of W3dRGBStruct's)
 			--0x0000003E:	--W3D_CHUNK_SCG	// per-vertex specular color values (array of W3dRGBStruct's)
 			0x00000048:	--W3D_CHUNK_TEXTURE_STAGE	// wrapper around a texture stage.
@@ -861,7 +880,7 @@ fn ReadMeshMaterialPass fstream chunkEnd=
 			)
 		) -- end case
 	) -- end while
-	result = W3dMeshMaterialPass vmIds shaderIds txStage txStages
+	result = W3dMeshMaterialPass vmIds shaderIds txStage txStages dcg
 )
 
 fn ReadMesh fstream chunkEnd =

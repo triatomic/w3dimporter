@@ -1,2 +1,5 @@
 # Local-only agent guidance, intentionally not published
 CLAUDE.md
+
+# Local-only planning note (targets the separate max2w3d C++ repo, not this one)
+docs/superpowers/plans/2026-06-16-multipass-w3dmaterial-authoring.md

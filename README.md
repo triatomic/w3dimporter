@@ -12,6 +12,7 @@ Tested on 3ds Max 2023.
 
 - [w3dimporter](#w3dimporter)
   - [Usage](#usage)
+  - [Changelog (v21.6)](#changelog-v216)
   - [Changelog (v21.5)](#changelog-v215)
   - [Changelog (v20.0 vs v17.1)](#changelog-v200-vs-v171)
     - [Advanced Renegade Import dialog](#advanced-renegade-import-dialog)
@@ -85,6 +86,19 @@ If a runtime error inside an import leaves the dialog's buttons unresponsive, ty
 `w3dimporter.ms` is now generated from `modules/*.ms` by `build-w3dimporter.ps1`.
 Edit modules, not the output. Install via the drag-drop `dist/w3dimporter.mzp`,
 which adds a **W3D Tools > W3D Importer** menu. See `modules/README.md`.
+
+<details id="changelog-v216">
+<summary><h2>Changelog (v21.6)</h2></summary>
+
+### Per-vertex colour (`W3D_CHUNK_DCG`) is now imported and round-trips
+
+The importer previously skipped `W3D_CHUNK_DCG` (per-vertex diffuse colour / alpha) entirely — the chunk reader `fseek`'d past it and no Max vertex-colour channel was ever built — so the data was lost on import and dropped on any re-export.
+
+It is now read into the mesh model and applied to the Max vertex-colour channel. W3D stores DCG in two forms, distinguished by the exporter's per-node **VAlpha** geometry flag: as real per-vertex **colour** `(rgb, 255)`, or as per-vertex **alpha** `(255,255,255, a)` — white RGB with painted transparency, ubiquitous in Renegade levels. The importer detects which form each mesh uses and reconstructs the matching Max state: RGB into the vertex-colour channel for colour data, or grayscale alpha plus the VAlpha node flag (`wwSetVAlpha`) for alpha data, so a re-export regenerates the identical chunk. DCG is also located across **all** material passes, not just the first, since multi-pass Renegade meshes store it in a later pass.
+
+**Round-trip status:** colour DCG round-trips byte-exact. Alpha DCG is fully reconstructed on import but does **not** yet survive re-export — the meshes that use it are two-pass, and the alpha lives in the second (alpha-blended) pass that the shipped `max2w3d.dle` cannot author from script (the same PassOne-only limit as multi-pass W3DMaterial output). It will round-trip automatically once exporter multi-pass authoring lands.
+
+</details>
 
 <details id="changelog-v215">
 <summary><h2>Changelog (v21.5)</h2></summary>

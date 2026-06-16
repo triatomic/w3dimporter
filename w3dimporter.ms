@@ -10,7 +10,7 @@
 -- a version reads this: the rltMain window title (set in its open handler)
 -- and the cfW3DImporter debug banner. Bump it with any non-trivial logic
 -- change so the loaded copy is identifiable from the log.
-global W3DImporterVersion = "v21.5"
+global W3DImporterVersion = "v21.6"
 
 -- Reload helper: a runtime error inside cfW3DImporter can leave the rollout's
 -- event-handler thread stuck, making every button in the dialog unresponsive.
@@ -268,7 +268,8 @@ struct W3dMeshMaterialPass
 	vmIds,
 	shaderIds,
 	textureStage,	-- legacy: first stage (== textureStages[1] when present); kept for back-compat readers
-	textureStages	-- array of W3dMeshTextureStage, one per W3D_CHUNK_TEXTURE_STAGE in this pass
+	textureStages,	-- array of W3dMeshTextureStage, one per W3D_CHUNK_TEXTURE_STAGE in this pass
+	dcg				-- W3D_CHUNK_DCG per-vertex diffuse colors (array of Max Color, one per mesh vertex); undefined if absent
 )
 
 struct W3dMeshVertInfs
@@ -1166,12 +1167,27 @@ fn ReadMeshTextureStage fstream chunkEnd=
 	result = W3dMeshTextureStage txIds txCoords
 )
 
+fn ReadMeshDCGArray fstream chunkEnd =
+(
+	-- per-vertex diffuse colors (W3D_CHUNK_DCG): an array of W3dRGBAStruct
+	-- (4 bytes R,G,B,A each), one entry per mesh vertex. ReadColor already reads
+	-- exactly that layout, so this mirrors ReadMeshTextureCoordArray above.
+	dcg = #()
+	while (ftell fstream < chunkEnd) do
+	( append dcg (ReadColor fstream) )
+	return dcg
+)
+
 fn ReadMeshMaterialPass fstream chunkEnd=
 (
 	-- A MATERIAL_PASS may contain multiple TEXTURE_STAGE sub-chunks (stage 0, stage 1, ...).
 	-- Collect them all; expose stages[1] as the legacy `textureStage` field for back-compat.
 	local txStages = #()
 	local txStage = undefined
+	-- per-vertex diffuse colors (W3D_CHUNK_DCG); undefined when the pass has none.
+	-- Declared local (unlike vmIds/shaderIds, which are bare) so it can never leak
+	-- a previous mesh/pass's colors into a pass that omits the chunk.
+	local dcg = undefined
 	while (ftell fstream < chunkEnd) do
 	(
 		chunkType = ReadLong fstream #unsigned
@@ -1196,7 +1212,11 @@ fn ReadMeshMaterialPass fstream chunkEnd=
 				subChunkEnd = (ftell fstream) + chunkSize
 				shaderIds = ReadLongArray fstream subChunkEnd
 			)
-			--0x0000003B:	--W3D_CHUNK_DCG	// per-vertex diffuse color values (array of W3dRGBAStruct's)
+			0x0000003B:	--W3D_CHUNK_DCG	// per-vertex diffuse color values (array of W3dRGBAStruct's)
+			(
+				subChunkEnd = (ftell fstream) + chunkSize
+				dcg = ReadMeshDCGArray fstream subChunkEnd
+			)
 			--0x0000003C:	--W3D_CHUNK_DIG	// per-vertex diffuse illumination values (array of W3dRGBStruct's)
 			--0x0000003E:	--W3D_CHUNK_SCG	// per-vertex specular color values (array of W3dRGBStruct's)
 			0x00000048:	--W3D_CHUNK_TEXTURE_STAGE	// wrapper around a texture stage.
@@ -1221,7 +1241,7 @@ fn ReadMeshMaterialPass fstream chunkEnd=
 			)
 		) -- end case
 	) -- end while
-	result = W3dMeshMaterialPass vmIds shaderIds txStage txStages
+	result = W3dMeshMaterialPass vmIds shaderIds txStage txStages dcg
 )
 
 fn ReadMesh fstream chunkEnd =
@@ -3655,6 +3675,67 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 			(
 				for v = 1 to meshes[i].normals.count do
 				( setNormal gmMeshes[i] v meshes[i].normals[v] )
+			)
+
+			-- per-vertex diffuse color / alpha (W3D_CHUNK_DCG) -- v21.6
+			-- max2w3d writes DCG two ways (w3dexport.cpp ~7826; vertex defaults
+			-- DiffuseColor=(1,1,1) / Alpha=1 at ~4772):
+			--   VAlpha OFF -> DCG = (vertColor.rgb, 255)              per-vertex colour
+			--   VAlpha ON  -> DCG = (255,255,255, avg(vertColor.rgb)) per-vertex alpha
+			-- C&C meshes use the first form; Renegade level meshes use the second
+			-- (white RGB, painted alpha) -- which is why an rgb-only apply silently
+			-- lost it. Invert the exporter: if every alpha is 255 treat DCG as colour
+			-- and store rgb; if any alpha < 255 the meaningful channel is alpha, so
+			-- store it as a grayscale colour and flag the node VAlpha (wwSetVAlpha,
+			-- maxscript.cpp:432) so re-export regenerates the identical DCG. Skipped on
+			-- the No-Multi-Mat split path, like the normals/UV blocks above.
+			-- DCG can sit in ANY material pass: multi-pass Renegade meshes (e.g.
+			-- MGREF^2PASS) store the coloured data as pass 1 while the legacy
+			-- meshes[i].matlPass points at pass 2, so scan every pass for the one
+			-- carrying per-vertex data. Max has a single vertex-colour channel and the
+			-- exporter regenerates every pass's DCG from it, so one source pass suffices.
+			local dcgCols = undefined
+			local dcgPasses = meshes[i].matlPasses
+			if dcgPasses == undefined and meshes[i].matlPass != undefined do dcgPasses = #(meshes[i].matlPass)
+			if dcgPasses != undefined do
+			for pi = 1 to dcgPasses.count while dcgCols == undefined do
+			(
+				local pp = dcgPasses[pi]
+				if pp != undefined and pp.dcg != undefined and pp.dcg.count == gmMeshes[i].numverts do
+				(
+					-- ignore a degenerate all-(255,255,255,255) pass: it holds no
+					-- information and the exporter would drop it again anyway.
+					local varies = false
+					for c in pp.dcg while not varies do
+					( if (c.a != 255 or c.r != 255 or c.g != 255 or c.b != 255) do varies = true )
+					if varies do dcgCols = pp.dcg
+				)
+			)
+			if not noMultiMatHandled and dcgCols != undefined do
+			(
+				local dcgIsAlpha = false
+				for v = 1 to dcgCols.count while not dcgIsAlpha do
+				( if dcgCols[v].a != 255 do dcgIsAlpha = true )
+
+				setNumCPVVerts gmMeshes[i] dcgCols.count
+				for v = 1 to dcgCols.count do
+				(
+					local c = dcgCols[v]
+					if dcgIsAlpha then ( setVertColor gmMeshes[i] v (color c.a c.a c.a) )
+					else ( setVertColor gmMeshes[i] v (color c.r c.g c.b) )
+				)
+				buildVCFaces gmMeshes[i]
+				for f = 1 to gmFaces.count do
+				( setVCFace gmMeshes[i] f gmFaces[f] )
+				update gmMeshes[i]
+
+				if dcgIsAlpha do
+				(
+					try ( wwSetVAlpha gmMeshes[i] true )
+					catch ( format "*** wwSetVAlpha failed on %\n" gmMeshes[i].name )
+				)
+				if debugOutput do
+				( format "  DCG -> % (% verts, mode=%)\n" gmMeshes[i].name dcgCols.count (if dcgIsAlpha then "alpha" else "color") )
 			)
 
 			-- Fix Vertices and Fix Normals were originally applied here, but they interfere
