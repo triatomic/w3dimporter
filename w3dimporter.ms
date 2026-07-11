@@ -10,7 +10,7 @@
 -- a version reads this: the rltMain window title (set in its open handler)
 -- and the cfW3DImporter debug banner. Bump it with any non-trivial logic
 -- change so the loaded copy is identifiable from the log.
-global W3DImporterVersion = "v21.9"
+global W3DImporterVersion = "v21.10"
 
 -- Reload helper: a runtime error inside cfW3DImporter can leave the rollout's
 -- event-handler thread stuck, making every button in the dialog unresponsive.
@@ -1548,7 +1548,42 @@ struct RenegadeSelection
 -- registered they return undefined immediately; callers already handle that.
 -- ---------------------------------------------------------------------------
 
-fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable =
+-- Per-triangle W3D surface type (W3dTriStruct.Attributes) is per-FACE in the
+-- file but per-MATERIAL in Max (the W3DMaterial "Surface Type" combo). max2w3d.dle
+-- exports one surface type per material and stamps it onto every face using that
+-- material (w3dexport.cpp: face.SurfaceType = W3DMaterial::GetSurfaceType()). To
+-- round-trip it we pick the dominant (most common) surface type across a mesh's
+-- faces and set it on the built material. Returns 0 (Light Metal / default) for an
+-- empty or undefined face array. Ties resolve to the first-seen value.
+fn w3dDominantSurfaceType faces =
+(
+	if faces == undefined or faces.count == 0 do return 0
+	local seen = #()    -- surface-type values
+	local cnts = #()    -- parallel counts
+	for f in faces do
+	(
+		local st = f.attrs
+		if st == undefined do st = 0
+		local ix = findItem seen st
+		if ix == 0 then ( append seen st; append cnts 1 )
+		else cnts[ix] += 1
+	)
+	local bestIx = 1
+	for k = 2 to cnts.count do ( if cnts[k] > cnts[bestIx] do bestIx = k )
+	return seen[bestIx]
+)
+
+-- Set the W3DMaterial "Surface Type" combo (0..27) via the wwSetSurfaceType
+-- MAXScript primitive exposed by max2w3d.dle. No-op (caught) if the primitive
+-- isn't registered in the installed DLL, so an older plugin degrades gracefully.
+fn _w3dApplySurfaceType m surfaceType =
+(
+	if m == undefined or surfaceType == undefined do return false
+	try ( wwSetSurfaceType m surfaceType; true )
+	catch ( format "*** [W3DMatl] wwSetSurfaceType failed (value=%) -- older max2w3d.dle?\n" surfaceType; false )
+)
+
+fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable surfaceType:0 =
 (
 	if not w3dMatlAvailable do return undefined
 	local m = undefined
@@ -1621,6 +1656,10 @@ fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable =
 		catch ( format "*** [buildW3DMatl] bitmaptex failed for %\n" texFile )
 		setProperty m #stage0display true -- show in viewport
 	)
+
+	-- per-material W3D surface type (per-face in the file; dominant value passed in)
+	_w3dApplySurfaceType m surfaceType
+
 	return m
 )
 
@@ -1635,7 +1674,7 @@ fn _w3dSetPassProp m baseName suffix value =
 	catch ( format "*** [W3DMatl] setProperty % failed (value=%)\n" nm value )
 )
 
-fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable =
+fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable surfaceType:0 =
 (
 	-- Builds a single W3DMaterial with native multi-pass support.
 	-- Requires a max2w3d.dle build where pass 2/3/4 ParamBlock2 declarations have
@@ -1746,6 +1785,10 @@ fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable
 			catch ( format "*** [buildMultiPassW3DMatl] bitmaptex failed for stage1 %\n" tex1 )
 		)
 	)
+
+	-- per-material W3D surface type (lives on the shared SurfaceTypeBlock, not per-pass)
+	_w3dApplySurfaceType m surfaceType
+
 	return m
 )
 
@@ -2446,6 +2489,23 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 			for f = 1 to meshes[i].faces.count do
 				gmFaces[f] = meshes[i].faces[f].vertIds + 1 -- gMax array lower-limit is 1 while w3d's is 0
 
+			-- Per-triangle W3D surface type (W3dTriStruct.Attributes) -> per-material in
+			-- Max. Pick the dominant value for this mesh; every W3DMaterial built below
+			-- gets it via surfaceType: (only honored on the "Use W3D Materials" path --
+			-- the standardMaterial fallback has no surface-type slot). Warn under Debug
+			-- Output when faces disagree, since a single material can't round-trip a mix.
+			local _rnSurfType = w3dDominantSurfaceType meshes[i].faces
+			if debugOutput and useW3DMatl do
+			(
+				local _stAllSame = true
+				for f = 2 to meshes[i].faces.count while _stAllSame do
+					if meshes[i].faces[f].attrs != meshes[i].faces[1].attrs do _stAllSame = false
+				if not _stAllSame then
+					format "  [%] mixed per-face surface types -> using dominant=% (won't fully round-trip on one material)\n" meshes[i].header.meshName _rnSurfType
+				else if _rnSurfType != 0 do
+					format "  [%] surface type=%\n" meshes[i].header.meshName _rnSurfType
+			)
+
 			-- create a mesh
 			gmMeshes[i] = mesh name:(w3dUniqueNodeName meshes[i].header.meshName) vertices:gmVerts faces:gmFaces
 			-- Set by the No Multi-Mat splitter when it replaces gmMeshes[i] with a split node;
@@ -2806,7 +2866,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 						-- types/args from the vertex material; we just append stage 1's texture.
 						local tex0 = meshes[i].textures[1].txFileName
 						local tex1 = meshes[i].textures[2].txFileName
-						local tsMatl = buildW3DMatl meshes[i].header.meshName tsVm tex0 meshBlendMode ::w3dMatlAvailable
+						local tsMatl = buildW3DMatl meshes[i].header.meshName tsVm tex0 meshBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType
 						if tsMatl != undefined do
 						(
 							try ( setProperty tsMatl #stage1texenabled true ) catch ()
@@ -2932,7 +2992,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 						local singleMatlBuilt = false
 						if useW3DMatl and mpResolved do
 						(
-							local mpW3D = buildMultiPassW3DMatl meshes[i].header.meshName mpVms mpTex0 mpTex1 mpBms ::w3dMatlAvailable
+							local mpW3D = buildMultiPassW3DMatl meshes[i].header.meshName mpVms mpTex0 mpTex1 mpBms ::w3dMatlAvailable surfaceType:_rnSurfType
 							if mpW3D != undefined do
 							(
 								gmMeshes[i].material = mpW3D
@@ -2979,7 +3039,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 							local pSub = undefined
 							if useW3DMatl then
 							(
-								pSub = buildW3DMatl pName pVm pTex pBm ::w3dMatlAvailable
+								pSub = buildW3DMatl pName pVm pTex pBm ::w3dMatlAvailable surfaceType:_rnSurfType
 								-- wire stage 1 texture if this pass uses two texture stages
 								if (pSub != undefined) and (pTex1 != "") do
 								(
@@ -3218,7 +3278,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 									append bBms mxBms[p]
 								)
 								local subName = meshes[i].header.meshName + "_bucket" + (b as string)
-								local sub = buildMultiPassW3DMatl subName bVms bTex0 bTex1 bBms ::w3dMatlAvailable
+								local sub = buildMultiPassW3DMatl subName bVms bTex0 bTex1 bBms ::w3dMatlAvailable surfaceType:_rnSurfType
 								if sub == undefined do ( mxSubsOk = false; exit )
 								append mxSubs sub
 							)
@@ -3291,7 +3351,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 								)
 								format "  -> sub[%] tex=% picked blendmode=% (%)\n" m meshes[i].textures[m].txFileName subBlendMode subBmLabel
 							)
-							subMatl = buildW3DMatl subName curVm meshes[i].textures[m].txFileName subBlendMode ::w3dMatlAvailable
+							subMatl = buildW3DMatl subName curVm meshes[i].textures[m].txFileName subBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType
 						)
 
 						if subMatl == undefined then
@@ -3591,7 +3651,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 							local texFile = ""
 							if (meshes[i].textures != undefined) and (meshes[i].textures.count > 0) do
 							( texFile = meshes[i].textures[1].txFileName )
-							gmMatl = buildW3DMatl matlName meshes[i].vertMatls[1] texFile meshBlendMode ::w3dMatlAvailable
+							gmMatl = buildW3DMatl matlName meshes[i].vertMatls[1] texFile meshBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType
 						)
 
 						if gmMatl != undefined then

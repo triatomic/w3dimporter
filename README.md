@@ -12,6 +12,7 @@ Tested on 3ds Max 2023.
 
 - [w3dimporter](#w3dimporter)
   - [Usage](#usage)
+  - [Changelog (v21.10)](#changelog-v2110)
   - [Changelog (v21.9)](#changelog-v219)
   - [Changelog (v21.8)](#changelog-v218)
   - [Changelog (v21.7)](#changelog-v217)
@@ -89,6 +90,19 @@ If a runtime error inside an import leaves the dialog's buttons unresponsive, ty
 `w3dimporter.ms` is now generated from `modules/*.ms` by `build-w3dimporter.ps1`.
 Edit modules, not the output. Install via the drag-drop `dist/w3dimporter.mzp`,
 which adds a **W3D Tools > W3D Importer** menu. See `modules/README.md`.
+
+<details id="changelog-v2110">
+<summary><h2>Changelog (v21.10)</h2></summary>
+
+### Per-triangle surface type (`W3dTriStruct.Attributes`) is now imported
+
+Every W3D triangle carries a surface-type attribute (`W3dTriStruct.Attributes` — `Light Metal`, `Water`, `Grass`, `Ice`, … one of 28 values) that the game reads at collision time to pick footstep sounds, bullet-impact effects and splashes (it drives `SurfaceEffects.INI`). The importer read this field into each face but never applied it, so it was dropped on import and lost on any re-export.
+
+It is now imported when **Use W3D Materials** is on. Surface type is per-*triangle* in the file but per-*material* in Max (the W3DMaterial **Surface Type** combo), which is exactly how `max2w3d.dle` exports it — one value per material, stamped onto every face using that material. So for each mesh the importer picks the **dominant** (most common) surface type across its faces and sets it on the built W3DMaterial via `wwSetSurfaceType`, and it round-trips back out on re-export with no exporter/DLL change. Verified end-to-end in 3ds Max: set/get round-trips and the dominant-value selection are correct against the shipped plugin.
+
+Surface-type import **requires Use W3D Materials on** — the Standard-material fallback path has no surface-type slot, so with it off the value is not applied (and not re-exported). A mesh whose faces have *mixed* surface types cannot be represented faithfully on a single material; the dominant value is used and, under **Debug Output**, the importer logs which meshes had a mix (and, for uniform meshes, the surface type applied).
+
+</details>
 
 <details id="changelog-v219">
 <summary><h2>Changelog (v21.9)</h2></summary>

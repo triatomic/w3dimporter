@@ -9,7 +9,42 @@
 -- registered they return undefined immediately; callers already handle that.
 -- ---------------------------------------------------------------------------
 
-fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable =
+-- Per-triangle W3D surface type (W3dTriStruct.Attributes) is per-FACE in the
+-- file but per-MATERIAL in Max (the W3DMaterial "Surface Type" combo). max2w3d.dle
+-- exports one surface type per material and stamps it onto every face using that
+-- material (w3dexport.cpp: face.SurfaceType = W3DMaterial::GetSurfaceType()). To
+-- round-trip it we pick the dominant (most common) surface type across a mesh's
+-- faces and set it on the built material. Returns 0 (Light Metal / default) for an
+-- empty or undefined face array. Ties resolve to the first-seen value.
+fn w3dDominantSurfaceType faces =
+(
+	if faces == undefined or faces.count == 0 do return 0
+	local seen = #()    -- surface-type values
+	local cnts = #()    -- parallel counts
+	for f in faces do
+	(
+		local st = f.attrs
+		if st == undefined do st = 0
+		local ix = findItem seen st
+		if ix == 0 then ( append seen st; append cnts 1 )
+		else cnts[ix] += 1
+	)
+	local bestIx = 1
+	for k = 2 to cnts.count do ( if cnts[k] > cnts[bestIx] do bestIx = k )
+	return seen[bestIx]
+)
+
+-- Set the W3DMaterial "Surface Type" combo (0..27) via the wwSetSurfaceType
+-- MAXScript primitive exposed by max2w3d.dle. No-op (caught) if the primitive
+-- isn't registered in the installed DLL, so an older plugin degrades gracefully.
+fn _w3dApplySurfaceType m surfaceType =
+(
+	if m == undefined or surfaceType == undefined do return false
+	try ( wwSetSurfaceType m surfaceType; true )
+	catch ( format "*** [W3DMatl] wwSetSurfaceType failed (value=%) -- older max2w3d.dle?\n" surfaceType; false )
+)
+
+fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable surfaceType:0 =
 (
 	if not w3dMatlAvailable do return undefined
 	local m = undefined
@@ -82,6 +117,10 @@ fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable =
 		catch ( format "*** [buildW3DMatl] bitmaptex failed for %\n" texFile )
 		setProperty m #stage0display true -- show in viewport
 	)
+
+	-- per-material W3D surface type (per-face in the file; dominant value passed in)
+	_w3dApplySurfaceType m surfaceType
+
 	return m
 )
 
@@ -96,7 +135,7 @@ fn _w3dSetPassProp m baseName suffix value =
 	catch ( format "*** [W3DMatl] setProperty % failed (value=%)\n" nm value )
 )
 
-fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable =
+fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable surfaceType:0 =
 (
 	-- Builds a single W3DMaterial with native multi-pass support.
 	-- Requires a max2w3d.dle build where pass 2/3/4 ParamBlock2 declarations have
@@ -207,6 +246,10 @@ fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable
 			catch ( format "*** [buildMultiPassW3DMatl] bitmaptex failed for stage1 %\n" tex1 )
 		)
 	)
+
+	-- per-material W3D surface type (lives on the shared SurfaceTypeBlock, not per-pass)
+	_w3dApplySurfaceType m surfaceType
+
 	return m
 )
 
