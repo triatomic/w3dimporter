@@ -12,6 +12,7 @@ Tested on 3ds Max 2023.
 
 - [w3dimporter](#w3dimporter)
   - [Usage](#usage)
+  - [Changelog (v21.12)](#changelog-v2112)
   - [Changelog (v21.11)](#changelog-v2111)
   - [Changelog (v21.10)](#changelog-v2110)
   - [Changelog (v21.9)](#changelog-v219)
@@ -91,6 +92,29 @@ If a runtime error inside an import leaves the dialog's buttons unresponsive, ty
 `w3dimporter.ms` is now generated from `modules/*.ms` by `build-w3dimporter.ps1`.
 Edit modules, not the output. Install via the drag-drop `dist/w3dimporter.mzp`,
 which adds a **W3D Tools > W3D Importer** menu. See `modules/README.md`.
+
+<details id="changelog-v2112">
+<summary><h2>Changelog (v21.12)</h2></summary>
+
+### Import summary: dropped content is now reported
+
+`.w3d` files can carry object types and features the importer does not (yet) support — particle emitters, dazzles, morph animations, sound render objects, lightmap prelit variants, per-vertex baked lighting (DIG), adaptive-delta compressed animations, and more. Previously all of these were **silently skipped**: the import looked successful and the loss was only discovered later (usually as a broken re-export or a model that looks wrong in-game).
+
+The importer now prints an `*** Import notice:` summary at the end of every import listing exactly what was in the file but not imported, with counts. Nothing about what *is* imported changed — this is pure transparency.
+
+Also fixed in passing: a `.w3d` containing **adaptive-delta compressed animation** used to derail the chunk parser (the skip path never advanced the stream, so channel data was parsed as chunk headers). Such files now parse cleanly; the animation itself is still not imported (by design — modders author uncompressed), and the summary says so.
+
+### Texture clamp/publish flags now import (`W3D_CHUNK_TEXTURE_INFO`)
+
+Renegade-era levels rely heavily on per-texture attributes — `mp_canyon.w3d` alone carries 1,143 `TEXTURE_INFO` chunks, nearly every texture flagged **Clamp U + Clamp V**. Both engines apply these at load (texture addressing mode), but the importer read the chunk and dropped it, so a re-exported map lost every clamp flag and clamped textures silently reverted to wrapping (visible as texture-edge bleeding).
+
+With **Use W3D Materials** on, the attributes word now maps onto the W3DMaterial per-stage texture toggles — **Clamp U, Clamp V, No LOD, Publish, Resize, Alpha Bitmap and the pass hint** — for every material path (single-pass, two-stage, native multi-pass, and the multi-sub fallback), so they round-trip through `max2w3d` exactly as authored. The animation fields (`AnimType`/`FrameCount`/`FrameRate`) are deliberately **not** imported: they are vestigial in both engines (Renegade animates textures via UV mapper args, which already import), and mip-level flags have no W3DMaterial parameter — both cases are listed in the new import summary instead of being silently dropped.
+
+### PRELIT header flags are no longer carried into Max
+
+In the original Westwood pipeline, prelit lighting data is authored by the dedicated **LightMap post-tool**, never by the Max exporter — `max2w3d` (original and ours) writes no `PRELIT_*` chunks. But "Import extended W3D Info" used to re-apply the mesh header's PRELIT flag bits via `wwSetFlags`, so re-exporting an imported prelit mesh produced a file that *claimed* to be prelit while containing no prelit data — the engines would then treat it as pre-lit and skip scene lighting on it. The importer now strips the PRELIT bits (mask `0x0F000000`) before applying header attributes and notes it in the import summary; re-light with a LightMap-style solve after re-export if baked lighting is needed.
+
+</details>
 
 <details id="changelog-v2111">
 <summary><h2>Changelog (v21.11)</h2></summary>

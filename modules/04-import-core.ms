@@ -47,6 +47,13 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 	global hlodSet = undefined
 	global pickbox = undefined
 
+	-- Skipped-content collector (v21.12): reset per import; chunk readers and
+	-- the top-level dispatch below append human-readable notes for data both
+	-- engines consume but we drop (lightmap prelit, DIG, emitters, dazzles,
+	-- adaptive-delta anim, ...). A deduplicated summary prints at the end of
+	-- the import so losses are visible instead of silent.
+	global w3dSkippedContent = #()
+
 	global gmPivots = #()
 	global gmMeshes = #()
 
@@ -203,7 +210,31 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 				--0x00000A00:	--W3D_CHUNK_SOUNDROBJ	// description of a sound render object
 
 				default:
-				( fseek fstream chunkSize #seek_cur )
+				(
+					-- Record recognizable-but-unhandled top-level object types so the
+					-- end-of-import summary can name what was dropped. EMITTER and
+					-- DAZZLE in particular are real, shipped Renegade asset types
+					-- (host-registered loaders; dazzles engine-registered).
+					local _skName = case chunkType of
+					(
+						0x000002C0: "MORPH_ANIMATION (facial pose anim)"
+						0x00000300: "HMODEL (legacy hierarchy model)"
+						0x00000400: "LODMODEL (legacy distance-LOD model)"
+						0x00000420: "COLLECTION"
+						0x00000460: "LIGHT (dead in both engines)"
+						0x00000500: "EMITTER (particle emitter)"
+						0x00000741: "SPHERE (animated primitive)"
+						0x00000742: "RING (animated primitive)"
+						0x00000750: "NULL_OBJECT"
+						0x00000800: "LIGHTSCAPE lights"
+						0x00000900: "DAZZLE (light glow/halo)"
+						0x00000A00: "SOUNDROBJ (sound render object)"
+						default: undefined
+					)
+					if _skName != undefined and w3dSkippedContent != undefined do
+						append w3dSkippedContent (_skName + " -- object not imported")
+					fseek fstream chunkSize #seek_cur
+				)
 			)
 			------ debug start ------
 			--print (bit.intAsHex filesize)
@@ -724,6 +755,16 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 				numTextures = 0
 				if meshes[i].textures != undefined do numTextures = meshes[i].textures.count
 
+				-- TEXTURE_INFO clamp/publish flags ride the W3DMaterial path (v21.12);
+				-- with Use W3D Materials OFF they cannot be stored -- surface the loss.
+				if (not useW3DMatl) and (meshes[i].textures != undefined) do
+					for t = 1 to meshes[i].textures.count do
+					(
+						local _ti = meshes[i].textures[t].txInfo
+						if _ti != undefined and _ti.attrs != undefined and _ti.attrs != 0 do
+							append w3dSkippedContent "texture clamp/publish flags (TEXTURE_INFO) -- lost: 'Use W3D Materials' is OFF"
+					)
+
 				-- Optional .tga <-> .dds extension rewrite. Many W3D files reference TGA
 				-- textures that have been re-exported as DDS later; toggling tga2dds swaps just
 				-- the extension (case-insensitive, name preserved) so the bitmaptex calls
@@ -1072,11 +1113,12 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 						-- types/args from the vertex material; we just append stage 1's texture.
 						local tex0 = meshes[i].textures[1].txFileName
 						local tex1 = meshes[i].textures[2].txFileName
-						local tsMatl = buildW3DMatl meshes[i].header.meshName tsVm tex0 meshBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType
+						local tsMatl = buildW3DMatl meshes[i].header.meshName tsVm tex0 meshBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType txInfo:meshes[i].textures[1].txInfo
 						if tsMatl != undefined do
 						(
 							try ( setProperty tsMatl #stage1texenabled true ) catch ()
 							try ( setProperty tsMatl #stage1texturemap (bitmaptex filename:tex1) ) catch ()
+							_w3dApplyTexInfo tsMatl "" 1 meshes[i].textures[2].txInfo -- stage-1 clamp/publish flags (v21.12)
 							gmMeshes[i].material = tsMatl
 							twoStageHandled = true
 							if debugOutput do
@@ -1171,6 +1213,8 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 						local mpVms = #()
 						local mpTex0 = #()
 						local mpTex1 = #()
+						local mpTx0i = #()  -- per-pass stage-0 TEXTURE_INFO (clamp flags etc; v21.12)
+						local mpTx1i = #()  -- per-pass stage-1 TEXTURE_INFO
 						local mpBms = #()
 						local mpResolved = true
 						for p = 1 to nPasses while mpResolved do
@@ -1187,7 +1231,13 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 							if not stagesOk do ( mpResolved = false; exit )
 							append mpVms meshes[i].vertMatls[vmIx]
 							append mpTex0 meshes[i].textures[stageTxIxs[1]].txFileName
-							if stageTxIxs.count >= 2 then ( append mpTex1 meshes[i].textures[stageTxIxs[2]].txFileName ) else ( append mpTex1 "" )
+							append mpTx0i meshes[i].textures[stageTxIxs[1]].txInfo
+							if stageTxIxs.count >= 2 then
+							(
+								append mpTex1 meshes[i].textures[stageTxIxs[2]].txFileName
+								append mpTx1i meshes[i].textures[stageTxIxs[2]].txInfo
+							)
+							else ( append mpTex1 ""; append mpTx1i undefined )
 							append mpBms (_tpClassify meshes[i].shaders[shIx])
 						)
 
@@ -1198,7 +1248,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 						local singleMatlBuilt = false
 						if useW3DMatl and mpResolved do
 						(
-							local mpW3D = buildMultiPassW3DMatl meshes[i].header.meshName mpVms mpTex0 mpTex1 mpBms ::w3dMatlAvailable surfaceType:_rnSurfType
+							local mpW3D = buildMultiPassW3DMatl meshes[i].header.meshName mpVms mpTex0 mpTex1 mpBms ::w3dMatlAvailable surfaceType:_rnSurfType txInfoList:mpTx0i txInfo1List:mpTx1i
 							if mpW3D != undefined do
 							(
 								gmMeshes[i].material = mpW3D
@@ -1245,12 +1295,13 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 							local pSub = undefined
 							if useW3DMatl then
 							(
-								pSub = buildW3DMatl pName pVm pTex pBm ::w3dMatlAvailable surfaceType:_rnSurfType
+								pSub = buildW3DMatl pName pVm pTex pBm ::w3dMatlAvailable surfaceType:_rnSurfType txInfo:meshes[i].textures[stageTxIxs[1]].txInfo
 								-- wire stage 1 texture if this pass uses two texture stages
 								if (pSub != undefined) and (pTex1 != "") do
 								(
 									try ( setProperty pSub #stage1texenabled true ) catch ()
 									try ( setProperty pSub #stage1texturemap (bitmaptex filename:pTex1) ) catch ()
+									_w3dApplyTexInfo pSub "" 1 meshes[i].textures[stageTxIxs[2]].txInfo -- stage-1 clamp flags (v21.12)
 								)
 							)
 							else
@@ -1475,16 +1526,18 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 								local bVms = #()
 								local bTex0 = #()
 								local bTex1 = #()
+								local bTx0i = #()  -- per-pass stage-0 TEXTURE_INFO (v21.12)
 								local bBms = #()
 								for p = 1 to nPasses2 do
 								(
 									append bVms meshes[i].vertMatls[mxVmIx[p]]
 									append bTex0 meshes[i].textures[ixs[p]].txFileName
+									append bTx0i meshes[i].textures[ixs[p]].txInfo -- stage-0 TEXTURE_INFO (v21.12)
 									append bTex1 ""
 									append bBms mxBms[p]
 								)
 								local subName = meshes[i].header.meshName + "_bucket" + (b as string)
-								local sub = buildMultiPassW3DMatl subName bVms bTex0 bTex1 bBms ::w3dMatlAvailable surfaceType:_rnSurfType
+								local sub = buildMultiPassW3DMatl subName bVms bTex0 bTex1 bBms ::w3dMatlAvailable surfaceType:_rnSurfType txInfoList:bTx0i
 								if sub == undefined do ( mxSubsOk = false; exit )
 								append mxSubs sub
 							)
@@ -1557,7 +1610,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 								)
 								format "  -> sub[%] tex=% picked blendmode=% (%)\n" m meshes[i].textures[m].txFileName subBlendMode subBmLabel
 							)
-							subMatl = buildW3DMatl subName curVm meshes[i].textures[m].txFileName subBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType
+							subMatl = buildW3DMatl subName curVm meshes[i].textures[m].txFileName subBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType txInfo:meshes[i].textures[m].txInfo
 						)
 
 						if subMatl == undefined then
@@ -1857,7 +1910,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 							local texFile = ""
 							if (meshes[i].textures != undefined) and (meshes[i].textures.count > 0) do
 							( texFile = meshes[i].textures[1].txFileName )
-							gmMatl = buildW3DMatl matlName meshes[i].vertMatls[1] texFile meshBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType
+							gmMatl = buildW3DMatl matlName meshes[i].vertMatls[1] texFile meshBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType txInfo:(if (meshes[i].textures != undefined) and (meshes[i].textures.count > 0) then meshes[i].textures[1].txInfo else undefined)
 						)
 
 						if gmMatl != undefined then
@@ -3111,9 +3164,21 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 					format "  [%] read: attrs=% sortLevel=% (props: %)\n" \
 						gmMeshes[i].name (bit.intAsHex hdr.attrs) hdr.sortLevel (cfDecodeW3DAttrs hdr.attrs)
 				)
+				-- Strip the PRELIT bits (W3D_MESH_FLAG_PRELIT_MASK 0x0F000000) before
+				-- re-applying header attrs (v21.12). Prelit data is authored by the
+				-- LightMap post-tool, never by max2w3d; carrying the flags into Max
+				-- would make a re-export claim "prelit" while containing no PRELIT
+				-- chunks (flag-without-data -- engines would treat the mesh as
+				-- pre-lit and skip scene lighting on it). Recorded in the summary.
+				local _applyAttrs = hdr.attrs
+				if (bit.and _applyAttrs 0x0F000000) != 0 do
+				(
+					_applyAttrs = bit.and _applyAttrs (bit.not 0x0F000000)
+					append w3dSkippedContent "PRELIT header flags stripped -- prelit data is authored by the LightMap tool, not Max; re-light after re-export"
+				)
 				try
 				(
-					wwSetFlags gmMeshes[i] hdr.attrs
+					wwSetFlags gmMeshes[i] _applyAttrs
 					wwSetSorting gmMeshes[i] hdr.sortLevel
 					if debugOutput do
 						format "  [%] applied: wwSetFlags + wwSetSorting OK\n" gmMeshes[i].name
@@ -3277,6 +3342,29 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 			)
 		)
 		-- ---- end renegade aggregate/proxy ----
+
+		-- Skipped-content summary (v21.12). Deduplicated with counts; always
+		-- printed (not gated by Debug Output) -- silent data loss is exactly how
+		-- import bugs stay hidden. One block per imported file.
+		if w3dSkippedContent != undefined and w3dSkippedContent.count > 0 do
+		(
+			local _skKeys = #()
+			local _skCounts = #()
+			for s in w3dSkippedContent do
+			(
+				local ix = findItem _skKeys s
+				if ix == 0 then ( append _skKeys s; append _skCounts 1 )
+				else _skCounts[ix] += 1
+			)
+			format "*** Import notice: data in % was NOT imported:\n" (filenameFromPath w3dfilename)
+			for k = 1 to _skKeys.count do
+			(
+				if _skCounts[k] > 1 then
+					format "***   - % (x%)\n" _skKeys[k] _skCounts[k]
+				else
+					format "***   - %\n" _skKeys[k]
+			)
+		)
 
 		-- Pure animation (v19): when checked, bake an FBX next to the source .w3d
 		-- (works in both batch and single-file mode). Wrapped in try() because

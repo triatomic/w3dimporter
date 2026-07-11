@@ -9,7 +9,7 @@
 -- a version reads this: the rltMain window title (set in its open handler)
 -- and the cfW3DImporter debug banner. Bump it with any non-trivial logic
 -- change so the loaded copy is identifiable from the log.
-global W3DImporterVersion = "v21.11"
+global W3DImporterVersion = "v21.12"
 
 -- Reload helper: a runtime error inside cfW3DImporter can leave the rollout's
 -- event-handler thread stuck, making every button in the dialog unresponsive.
@@ -36,6 +36,14 @@ global w3di = W3DImporterNamespace()
 -- global slots up front so both paths behave identically.
 global W3DImporterInit
 global rnPendingFile
+-- Skipped-content collector (v21.12): chunk readers in 02-chunkreader.ms
+-- append human-readable notes here when they skip data the engines consume
+-- (lightmap prelit, DIG, adaptive-delta anim, emitters, dazzles, ...);
+-- cfW3DImporter resets it per import and prints a deduplicated summary at the
+-- end, so dropped content is visible instead of silent. Forward-declared for
+-- the same autoload reason as the names above (readers compile before the
+-- assignment in cfW3DImporter executes).
+global w3dSkippedContent
 -- rltMain is defined at ~line 5979, after rltRenegade (~line 4655) whose
 -- doImport handler reads rltMain.ckb*.checked. Under scripts/startup/ that
 -- read otherwise fails (undefined) and the try/catch around it silently

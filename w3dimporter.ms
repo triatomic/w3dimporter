@@ -10,7 +10,7 @@
 -- a version reads this: the rltMain window title (set in its open handler)
 -- and the cfW3DImporter debug banner. Bump it with any non-trivial logic
 -- change so the loaded copy is identifiable from the log.
-global W3DImporterVersion = "v21.11"
+global W3DImporterVersion = "v21.12"
 
 -- Reload helper: a runtime error inside cfW3DImporter can leave the rollout's
 -- event-handler thread stuck, making every button in the dialog unresponsive.
@@ -37,6 +37,14 @@ global w3di = W3DImporterNamespace()
 -- global slots up front so both paths behave identically.
 global W3DImporterInit
 global rnPendingFile
+-- Skipped-content collector (v21.12): chunk readers in 02-chunkreader.ms
+-- append human-readable notes here when they skip data the engines consume
+-- (lightmap prelit, DIG, adaptive-delta anim, emitters, dazzles, ...);
+-- cfW3DImporter resets it per import and prints a deduplicated summary at the
+-- end, so dropped content is visible instead of silent. Forward-declared for
+-- the same autoload reason as the names above (readers compile before the
+-- assignment in cfW3DImporter executes).
+global w3dSkippedContent
 -- rltMain is defined at ~line 5979, after rltRenegade (~line 4655) whose
 -- doImport handler reads rltMain.ckb*.checked. Under scripts/startup/ that
 -- read otherwise fails (undefined) and the try/catch around it silently
@@ -805,16 +813,23 @@ fn ReadCompressedAnimation fstream chunkEnd =
 					)
 					0x1: --ANIM_FLAVOUR_ADAPTIVE_DELTA
 					(
-						--channels[(channels.count + 1)] = ReadAnimationAdaptiveDeltaChannel fstream subChunkEnd
+						-- Deliberately not imported (roadmap decision: modders don't
+						-- author compressed anims). The old empty arm never advanced
+						-- the stream, so the next loop iteration parsed channel DATA
+						-- as chunk headers and derailed the rest of the file --
+						-- skip explicitly and record the loss.
+						if w3dSkippedContent != undefined do append w3dSkippedContent "adaptive-delta compressed animation channel -- animation not imported"
+						fseek fstream subChunkEnd #seek_set
 					)
-					--0x2: --ANIM_FLAVOUR_VALID
+					default: --unknown flavour: skip safely, never derail the parse
+					( fseek fstream subChunkEnd #seek_set )
 				)
 			)
-			--0x00000283:	--W3D_CHUNK_COMPRESSED_BIT_CHANNEL	-- channel of boolean values (e.g. visibility)
-			--(
-			--	subChunkEnd = (ftell fstream) + chunkSize
-			--	bitchannels[(bitchannels.count + 1)] = ReadCompressedAnimationBitChannel fstream subChunkEnd
-			--)
+			0x00000283:	--W3D_CHUNK_COMPRESSED_BIT_CHANNEL	-- timecoded visibility
+			(
+				if w3dSkippedContent != undefined do append w3dSkippedContent "timecoded visibility bit channel (COMPRESSED_BIT_CHANNEL) -- not imported"
+				fseek fstream chunkSize #seek_cur
+			)
 			0x00000284:	--W3D_CHUNK_COMPRESSED_ADAPTIVE_DELTA_MOTION_ANIMATION_CHANNEL
 			(
 				subChunkEnd = (ftell fstream) + chunkSize
@@ -826,7 +841,11 @@ fn ReadCompressedAnimation fstream chunkEnd =
 				(
 					0x0: --ANIM_FLAVOUR_TIMECODED
 					( channels[(channels.count + 1)] = ReadAnimationCompressedMotionChannel fstream subChunkEnd )
-
+					default: --adaptive-delta / unknown: skip safely (see 0x282 note)
+					(
+						if w3dSkippedContent != undefined do append w3dSkippedContent "adaptive-delta compressed animation channel -- animation not imported"
+						fseek fstream subChunkEnd #seek_set
+					)
 				)
 			)
 			default:
@@ -1218,8 +1237,15 @@ fn ReadMeshMaterialPass fstream chunkEnd=
 				subChunkEnd = (ftell fstream) + chunkSize
 				dcg = ReadMeshDCGArray fstream subChunkEnd
 			)
-			--0x0000003C:	--W3D_CHUNK_DIG	// per-vertex diffuse illumination values (array of W3dRGBStruct's)
-			--0x0000003E:	--W3D_CHUNK_SCG	// per-vertex specular color values (array of W3dRGBStruct's)
+			0x0000003C:	--W3D_CHUNK_DIG	// per-vertex diffuse illumination (baked lighting)
+			(
+				-- Not yet applied (roadmap P4: both engines multiply DIG into the
+				-- vertex color array at load) -- record the skip so the loss shows
+				-- in the import summary instead of the mesh just looking unlit.
+				if w3dSkippedContent != undefined do append w3dSkippedContent "DIG per-vertex baked lighting -- not imported (mesh may look unlit vs in-game)"
+				fseek fstream chunkSize #seek_cur
+			)
+			--0x0000003E:	--W3D_CHUNK_SCG	// per-vertex specular color values -- dead in BOTH engines (Renegade read_scg is a stub); intentionally ignored
 			0x00000048:	--W3D_CHUNK_TEXTURE_STAGE	// wrapper around a texture stage.
 			(
 				subChunkEnd = (ftell fstream) + chunkSize
@@ -1299,8 +1325,21 @@ fn ReadMesh fstream chunkEnd =
 			-- terrain in particular) fall through to the default arm and skip the
 			-- entire material block.
 			0x00000024: ()  -- W3D_CHUNK_PRELIT_VERTEX: descend (no-op; do not advance)
-			--0x00000025:	--W3D_CHUNK_PRELIT_LIGHTMAP_MULTI_PASS	// optional lightmapped multi-pass material chunk wrapper
-			--0x00000026:	--W3D_CHUNK_PRELIT_LIGHTMAP_MULTI_TEXTURE	// optional lightmapped multi-texture material chunk wrapper
+			-- Lightmap prelit variants are still skipped (real handling needs
+			-- lightmap textures + secondary UVs, not a wrapper descend) -- but
+			-- record the skip so the import summary surfaces the loss. Both
+			-- engines prefer these at render (shipped Renegade defaults to
+			-- PRELIT_MODE_LIGHTMAP_MULTI_PASS, ww3d.cpp:204).
+			0x00000025:	--W3D_CHUNK_PRELIT_LIGHTMAP_MULTI_PASS
+			(
+				if w3dSkippedContent != undefined do append w3dSkippedContent "lightmap prelit variant (PRELIT_LIGHTMAP_MULTI_PASS) -- baked lightmaps not imported"
+				fseek fstream chunkSize #seek_cur
+			)
+			0x00000026:	--W3D_CHUNK_PRELIT_LIGHTMAP_MULTI_TEXTURE
+			(
+				if w3dSkippedContent != undefined do append w3dSkippedContent "lightmap prelit variant (PRELIT_LIGHTMAP_MULTI_TEXTURE) -- baked lightmaps not imported"
+				fseek fstream chunkSize #seek_cur
+			)
 			0x00000028:	--W3D_CHUNK_MATERIAL_INFO	--materials information, pass count, etc (contains W3dMaterialInfoStruct)
 			(
 				matlheader = ReadMeshMaterialSetInfo fstream subChunkEnd
@@ -1573,6 +1612,33 @@ fn w3dDominantSurfaceType faces =
 	return seen[bestIx]
 )
 
+-- W3D_CHUNK_TEXTURE_INFO attributes -> W3DMaterial per-stage texture toggles
+-- (v21.12). Only the ATTRIBUTES word is mapped -- AnimType/FrameCount/FrameRate
+-- are vestigial in BOTH engines (Renegade animates textures via UV mapper args,
+-- which we already import). Flag values from w3d_file.h; param names from
+-- w3dmaterial.cpp (stage0publish/clampu/clampv/nolod/resize/alphabitmap/
+-- passhint, stage1* variants, _p2/_p3/_p4 pass suffixes).
+-- MIP_LEVELS (0x00C0) has no W3DMaterial param, so it cannot round-trip --
+-- record the loss in the import summary rather than dropping it silently.
+fn _w3dApplyTexInfo m sfx stageIdx txInfo =
+(
+	if txInfo == undefined or txInfo.attrs == undefined do return false
+	local a = txInfo.attrs
+	if a == 0 do return true
+	local stg = "stage" + (stageIdx as string)
+	if (bit.and a 0x0001) != 0 do _w3dSetPassProp m (stg + "publish") sfx true
+	if (bit.and a 0x0002) != 0 do _w3dSetPassProp m (stg + "resize") sfx true
+	if (bit.and a 0x0004) != 0 do _w3dSetPassProp m (stg + "nolod") sfx true
+	if (bit.and a 0x0008) != 0 do _w3dSetPassProp m (stg + "clampu") sfx true
+	if (bit.and a 0x0010) != 0 do _w3dSetPassProp m (stg + "clampv") sfx true
+	if (bit.and a 0x0020) != 0 do _w3dSetPassProp m (stg + "alphabitmap") sfx true
+	local hint = bit.and (bit.shift a -8) 0xFF
+	if hint != 0 do _w3dSetPassProp m (stg + "passhint") sfx hint
+	if (bit.and a 0x00C0) != 0 and w3dSkippedContent != undefined do
+		append w3dSkippedContent "texture mip-level flags (W3DTEXTURE_MIP_LEVELS) -- no W3DMaterial param, dropped on re-export"
+	true
+)
+
 -- Set the W3DMaterial "Surface Type" combo (0..27) via the wwSetSurfaceType
 -- MAXScript primitive exposed by max2w3d.dle. No-op (caught) if the primitive
 -- isn't registered in the installed DLL, so an older plugin degrades gracefully.
@@ -1583,7 +1649,7 @@ fn _w3dApplySurfaceType m surfaceType =
 	catch ( format "*** [W3DMatl] wwSetSurfaceType failed (value=%) -- older max2w3d.dle?\n" surfaceType; false )
 )
 
-fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable surfaceType:0 =
+fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable surfaceType:0 txInfo: =
 (
 	if not w3dMatlAvailable do return undefined
 	local m = undefined
@@ -1657,6 +1723,10 @@ fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable surfaceType:0 =
 		setProperty m #stage0display true -- show in viewport
 	)
 
+	-- TEXTURE_INFO attributes for stage 0 (clamp/publish/NoLOD/...; v21.12)
+	if txInfo != unsupplied and txInfo != undefined do
+		_w3dApplyTexInfo m "" 0 txInfo
+
 	-- per-material W3D surface type (per-face in the file; dominant value passed in)
 	_w3dApplySurfaceType m surfaceType
 
@@ -1674,7 +1744,7 @@ fn _w3dSetPassProp m baseName suffix value =
 	catch ( format "*** [W3DMatl] setProperty % failed (value=%)\n" nm value )
 )
 
-fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable surfaceType:0 =
+fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable surfaceType:0 txInfoList: txInfo1List: =
 (
 	-- Builds a single W3DMaterial with native multi-pass support.
 	-- Requires a max2w3d.dle build where pass 2/3/4 ParamBlock2 declarations have
@@ -1784,6 +1854,11 @@ fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable
 			try ( _w3dSetPassProp m "stage1texturemap" sfx (bitmaptex filename:tex1) )
 			catch ( format "*** [buildMultiPassW3DMatl] bitmaptex failed for stage1 %\n" tex1 )
 		)
+		-- TEXTURE_INFO attributes per pass/stage (clamp/publish/NoLOD/...; v21.12)
+		if txInfoList != unsupplied and txInfoList != undefined and txInfoList[p] != undefined do
+			_w3dApplyTexInfo m sfx 0 txInfoList[p]
+		if txInfo1List != unsupplied and txInfo1List != undefined and txInfo1List[p] != undefined do
+			_w3dApplyTexInfo m sfx 1 txInfo1List[p]
 	)
 
 	-- per-material W3D surface type (lives on the shared SurfaceTypeBlock, not per-pass)
@@ -1840,6 +1915,13 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 	global meshes = #()
 	global hlodSet = undefined
 	global pickbox = undefined
+
+	-- Skipped-content collector (v21.12): reset per import; chunk readers and
+	-- the top-level dispatch below append human-readable notes for data both
+	-- engines consume but we drop (lightmap prelit, DIG, emitters, dazzles,
+	-- adaptive-delta anim, ...). A deduplicated summary prints at the end of
+	-- the import so losses are visible instead of silent.
+	global w3dSkippedContent = #()
 
 	global gmPivots = #()
 	global gmMeshes = #()
@@ -1997,7 +2079,31 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 				--0x00000A00:	--W3D_CHUNK_SOUNDROBJ	// description of a sound render object
 
 				default:
-				( fseek fstream chunkSize #seek_cur )
+				(
+					-- Record recognizable-but-unhandled top-level object types so the
+					-- end-of-import summary can name what was dropped. EMITTER and
+					-- DAZZLE in particular are real, shipped Renegade asset types
+					-- (host-registered loaders; dazzles engine-registered).
+					local _skName = case chunkType of
+					(
+						0x000002C0: "MORPH_ANIMATION (facial pose anim)"
+						0x00000300: "HMODEL (legacy hierarchy model)"
+						0x00000400: "LODMODEL (legacy distance-LOD model)"
+						0x00000420: "COLLECTION"
+						0x00000460: "LIGHT (dead in both engines)"
+						0x00000500: "EMITTER (particle emitter)"
+						0x00000741: "SPHERE (animated primitive)"
+						0x00000742: "RING (animated primitive)"
+						0x00000750: "NULL_OBJECT"
+						0x00000800: "LIGHTSCAPE lights"
+						0x00000900: "DAZZLE (light glow/halo)"
+						0x00000A00: "SOUNDROBJ (sound render object)"
+						default: undefined
+					)
+					if _skName != undefined and w3dSkippedContent != undefined do
+						append w3dSkippedContent (_skName + " -- object not imported")
+					fseek fstream chunkSize #seek_cur
+				)
 			)
 			------ debug start ------
 			--print (bit.intAsHex filesize)
@@ -2518,6 +2624,16 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 				numTextures = 0
 				if meshes[i].textures != undefined do numTextures = meshes[i].textures.count
 
+				-- TEXTURE_INFO clamp/publish flags ride the W3DMaterial path (v21.12);
+				-- with Use W3D Materials OFF they cannot be stored -- surface the loss.
+				if (not useW3DMatl) and (meshes[i].textures != undefined) do
+					for t = 1 to meshes[i].textures.count do
+					(
+						local _ti = meshes[i].textures[t].txInfo
+						if _ti != undefined and _ti.attrs != undefined and _ti.attrs != 0 do
+							append w3dSkippedContent "texture clamp/publish flags (TEXTURE_INFO) -- lost: 'Use W3D Materials' is OFF"
+					)
+
 				-- Optional .tga <-> .dds extension rewrite. Many W3D files reference TGA
 				-- textures that have been re-exported as DDS later; toggling tga2dds swaps just
 				-- the extension (case-insensitive, name preserved) so the bitmaptex calls
@@ -2866,11 +2982,12 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 						-- types/args from the vertex material; we just append stage 1's texture.
 						local tex0 = meshes[i].textures[1].txFileName
 						local tex1 = meshes[i].textures[2].txFileName
-						local tsMatl = buildW3DMatl meshes[i].header.meshName tsVm tex0 meshBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType
+						local tsMatl = buildW3DMatl meshes[i].header.meshName tsVm tex0 meshBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType txInfo:meshes[i].textures[1].txInfo
 						if tsMatl != undefined do
 						(
 							try ( setProperty tsMatl #stage1texenabled true ) catch ()
 							try ( setProperty tsMatl #stage1texturemap (bitmaptex filename:tex1) ) catch ()
+							_w3dApplyTexInfo tsMatl "" 1 meshes[i].textures[2].txInfo -- stage-1 clamp/publish flags (v21.12)
 							gmMeshes[i].material = tsMatl
 							twoStageHandled = true
 							if debugOutput do
@@ -2965,6 +3082,8 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 						local mpVms = #()
 						local mpTex0 = #()
 						local mpTex1 = #()
+						local mpTx0i = #()  -- per-pass stage-0 TEXTURE_INFO (clamp flags etc; v21.12)
+						local mpTx1i = #()  -- per-pass stage-1 TEXTURE_INFO
 						local mpBms = #()
 						local mpResolved = true
 						for p = 1 to nPasses while mpResolved do
@@ -2981,7 +3100,13 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 							if not stagesOk do ( mpResolved = false; exit )
 							append mpVms meshes[i].vertMatls[vmIx]
 							append mpTex0 meshes[i].textures[stageTxIxs[1]].txFileName
-							if stageTxIxs.count >= 2 then ( append mpTex1 meshes[i].textures[stageTxIxs[2]].txFileName ) else ( append mpTex1 "" )
+							append mpTx0i meshes[i].textures[stageTxIxs[1]].txInfo
+							if stageTxIxs.count >= 2 then
+							(
+								append mpTex1 meshes[i].textures[stageTxIxs[2]].txFileName
+								append mpTx1i meshes[i].textures[stageTxIxs[2]].txInfo
+							)
+							else ( append mpTex1 ""; append mpTx1i undefined )
 							append mpBms (_tpClassify meshes[i].shaders[shIx])
 						)
 
@@ -2992,7 +3117,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 						local singleMatlBuilt = false
 						if useW3DMatl and mpResolved do
 						(
-							local mpW3D = buildMultiPassW3DMatl meshes[i].header.meshName mpVms mpTex0 mpTex1 mpBms ::w3dMatlAvailable surfaceType:_rnSurfType
+							local mpW3D = buildMultiPassW3DMatl meshes[i].header.meshName mpVms mpTex0 mpTex1 mpBms ::w3dMatlAvailable surfaceType:_rnSurfType txInfoList:mpTx0i txInfo1List:mpTx1i
 							if mpW3D != undefined do
 							(
 								gmMeshes[i].material = mpW3D
@@ -3039,12 +3164,13 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 							local pSub = undefined
 							if useW3DMatl then
 							(
-								pSub = buildW3DMatl pName pVm pTex pBm ::w3dMatlAvailable surfaceType:_rnSurfType
+								pSub = buildW3DMatl pName pVm pTex pBm ::w3dMatlAvailable surfaceType:_rnSurfType txInfo:meshes[i].textures[stageTxIxs[1]].txInfo
 								-- wire stage 1 texture if this pass uses two texture stages
 								if (pSub != undefined) and (pTex1 != "") do
 								(
 									try ( setProperty pSub #stage1texenabled true ) catch ()
 									try ( setProperty pSub #stage1texturemap (bitmaptex filename:pTex1) ) catch ()
+									_w3dApplyTexInfo pSub "" 1 meshes[i].textures[stageTxIxs[2]].txInfo -- stage-1 clamp flags (v21.12)
 								)
 							)
 							else
@@ -3269,16 +3395,18 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 								local bVms = #()
 								local bTex0 = #()
 								local bTex1 = #()
+								local bTx0i = #()  -- per-pass stage-0 TEXTURE_INFO (v21.12)
 								local bBms = #()
 								for p = 1 to nPasses2 do
 								(
 									append bVms meshes[i].vertMatls[mxVmIx[p]]
 									append bTex0 meshes[i].textures[ixs[p]].txFileName
+									append bTx0i meshes[i].textures[ixs[p]].txInfo -- stage-0 TEXTURE_INFO (v21.12)
 									append bTex1 ""
 									append bBms mxBms[p]
 								)
 								local subName = meshes[i].header.meshName + "_bucket" + (b as string)
-								local sub = buildMultiPassW3DMatl subName bVms bTex0 bTex1 bBms ::w3dMatlAvailable surfaceType:_rnSurfType
+								local sub = buildMultiPassW3DMatl subName bVms bTex0 bTex1 bBms ::w3dMatlAvailable surfaceType:_rnSurfType txInfoList:bTx0i
 								if sub == undefined do ( mxSubsOk = false; exit )
 								append mxSubs sub
 							)
@@ -3351,7 +3479,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 								)
 								format "  -> sub[%] tex=% picked blendmode=% (%)\n" m meshes[i].textures[m].txFileName subBlendMode subBmLabel
 							)
-							subMatl = buildW3DMatl subName curVm meshes[i].textures[m].txFileName subBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType
+							subMatl = buildW3DMatl subName curVm meshes[i].textures[m].txFileName subBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType txInfo:meshes[i].textures[m].txInfo
 						)
 
 						if subMatl == undefined then
@@ -3651,7 +3779,7 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 							local texFile = ""
 							if (meshes[i].textures != undefined) and (meshes[i].textures.count > 0) do
 							( texFile = meshes[i].textures[1].txFileName )
-							gmMatl = buildW3DMatl matlName meshes[i].vertMatls[1] texFile meshBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType
+							gmMatl = buildW3DMatl matlName meshes[i].vertMatls[1] texFile meshBlendMode ::w3dMatlAvailable surfaceType:_rnSurfType txInfo:(if (meshes[i].textures != undefined) and (meshes[i].textures.count > 0) then meshes[i].textures[1].txInfo else undefined)
 						)
 
 						if gmMatl != undefined then
@@ -4905,9 +5033,21 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 					format "  [%] read: attrs=% sortLevel=% (props: %)\n" \
 						gmMeshes[i].name (bit.intAsHex hdr.attrs) hdr.sortLevel (cfDecodeW3DAttrs hdr.attrs)
 				)
+				-- Strip the PRELIT bits (W3D_MESH_FLAG_PRELIT_MASK 0x0F000000) before
+				-- re-applying header attrs (v21.12). Prelit data is authored by the
+				-- LightMap post-tool, never by max2w3d; carrying the flags into Max
+				-- would make a re-export claim "prelit" while containing no PRELIT
+				-- chunks (flag-without-data -- engines would treat the mesh as
+				-- pre-lit and skip scene lighting on it). Recorded in the summary.
+				local _applyAttrs = hdr.attrs
+				if (bit.and _applyAttrs 0x0F000000) != 0 do
+				(
+					_applyAttrs = bit.and _applyAttrs (bit.not 0x0F000000)
+					append w3dSkippedContent "PRELIT header flags stripped -- prelit data is authored by the LightMap tool, not Max; re-light after re-export"
+				)
 				try
 				(
-					wwSetFlags gmMeshes[i] hdr.attrs
+					wwSetFlags gmMeshes[i] _applyAttrs
 					wwSetSorting gmMeshes[i] hdr.sortLevel
 					if debugOutput do
 						format "  [%] applied: wwSetFlags + wwSetSorting OK\n" gmMeshes[i].name
@@ -5071,6 +5211,29 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 			)
 		)
 		-- ---- end renegade aggregate/proxy ----
+
+		-- Skipped-content summary (v21.12). Deduplicated with counts; always
+		-- printed (not gated by Debug Output) -- silent data loss is exactly how
+		-- import bugs stay hidden. One block per imported file.
+		if w3dSkippedContent != undefined and w3dSkippedContent.count > 0 do
+		(
+			local _skKeys = #()
+			local _skCounts = #()
+			for s in w3dSkippedContent do
+			(
+				local ix = findItem _skKeys s
+				if ix == 0 then ( append _skKeys s; append _skCounts 1 )
+				else _skCounts[ix] += 1
+			)
+			format "*** Import notice: data in % was NOT imported:\n" (filenameFromPath w3dfilename)
+			for k = 1 to _skKeys.count do
+			(
+				if _skCounts[k] > 1 then
+					format "***   - % (x%)\n" _skKeys[k] _skCounts[k]
+				else
+					format "***   - %\n" _skKeys[k]
+			)
+		)
 
 		-- Pure animation (v19): when checked, bake an FBX next to the source .w3d
 		-- (works in both batch and single-file mode). Wrapped in try() because

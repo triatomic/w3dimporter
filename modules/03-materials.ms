@@ -34,6 +34,33 @@ fn w3dDominantSurfaceType faces =
 	return seen[bestIx]
 )
 
+-- W3D_CHUNK_TEXTURE_INFO attributes -> W3DMaterial per-stage texture toggles
+-- (v21.12). Only the ATTRIBUTES word is mapped -- AnimType/FrameCount/FrameRate
+-- are vestigial in BOTH engines (Renegade animates textures via UV mapper args,
+-- which we already import). Flag values from w3d_file.h; param names from
+-- w3dmaterial.cpp (stage0publish/clampu/clampv/nolod/resize/alphabitmap/
+-- passhint, stage1* variants, _p2/_p3/_p4 pass suffixes).
+-- MIP_LEVELS (0x00C0) has no W3DMaterial param, so it cannot round-trip --
+-- record the loss in the import summary rather than dropping it silently.
+fn _w3dApplyTexInfo m sfx stageIdx txInfo =
+(
+	if txInfo == undefined or txInfo.attrs == undefined do return false
+	local a = txInfo.attrs
+	if a == 0 do return true
+	local stg = "stage" + (stageIdx as string)
+	if (bit.and a 0x0001) != 0 do _w3dSetPassProp m (stg + "publish") sfx true
+	if (bit.and a 0x0002) != 0 do _w3dSetPassProp m (stg + "resize") sfx true
+	if (bit.and a 0x0004) != 0 do _w3dSetPassProp m (stg + "nolod") sfx true
+	if (bit.and a 0x0008) != 0 do _w3dSetPassProp m (stg + "clampu") sfx true
+	if (bit.and a 0x0010) != 0 do _w3dSetPassProp m (stg + "clampv") sfx true
+	if (bit.and a 0x0020) != 0 do _w3dSetPassProp m (stg + "alphabitmap") sfx true
+	local hint = bit.and (bit.shift a -8) 0xFF
+	if hint != 0 do _w3dSetPassProp m (stg + "passhint") sfx hint
+	if (bit.and a 0x00C0) != 0 and w3dSkippedContent != undefined do
+		append w3dSkippedContent "texture mip-level flags (W3DTEXTURE_MIP_LEVELS) -- no W3DMaterial param, dropped on re-export"
+	true
+)
+
 -- Set the W3DMaterial "Surface Type" combo (0..27) via the wwSetSurfaceType
 -- MAXScript primitive exposed by max2w3d.dle. No-op (caught) if the primitive
 -- isn't registered in the installed DLL, so an older plugin degrades gracefully.
@@ -44,7 +71,7 @@ fn _w3dApplySurfaceType m surfaceType =
 	catch ( format "*** [W3DMatl] wwSetSurfaceType failed (value=%) -- older max2w3d.dle?\n" surfaceType; false )
 )
 
-fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable surfaceType:0 =
+fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable surfaceType:0 txInfo: =
 (
 	if not w3dMatlAvailable do return undefined
 	local m = undefined
@@ -118,6 +145,10 @@ fn buildW3DMatl matName vm texFile blendMode w3dMatlAvailable surfaceType:0 =
 		setProperty m #stage0display true -- show in viewport
 	)
 
+	-- TEXTURE_INFO attributes for stage 0 (clamp/publish/NoLOD/...; v21.12)
+	if txInfo != unsupplied and txInfo != undefined do
+		_w3dApplyTexInfo m "" 0 txInfo
+
 	-- per-material W3D surface type (per-face in the file; dominant value passed in)
 	_w3dApplySurfaceType m surfaceType
 
@@ -135,7 +166,7 @@ fn _w3dSetPassProp m baseName suffix value =
 	catch ( format "*** [W3DMatl] setProperty % failed (value=%)\n" nm value )
 )
 
-fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable surfaceType:0 =
+fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable surfaceType:0 txInfoList: txInfo1List: =
 (
 	-- Builds a single W3DMaterial with native multi-pass support.
 	-- Requires a max2w3d.dle build where pass 2/3/4 ParamBlock2 declarations have
@@ -245,6 +276,11 @@ fn buildMultiPassW3DMatl matName vmList texList tex1List bmList w3dMatlAvailable
 			try ( _w3dSetPassProp m "stage1texturemap" sfx (bitmaptex filename:tex1) )
 			catch ( format "*** [buildMultiPassW3DMatl] bitmaptex failed for stage1 %\n" tex1 )
 		)
+		-- TEXTURE_INFO attributes per pass/stage (clamp/publish/NoLOD/...; v21.12)
+		if txInfoList != unsupplied and txInfoList != undefined and txInfoList[p] != undefined do
+			_w3dApplyTexInfo m sfx 0 txInfoList[p]
+		if txInfo1List != unsupplied and txInfo1List != undefined and txInfo1List[p] != undefined do
+			_w3dApplyTexInfo m sfx 1 txInfo1List[p]
 	)
 
 	-- per-material W3D surface type (lives on the shared SurfaceTypeBlock, not per-pass)

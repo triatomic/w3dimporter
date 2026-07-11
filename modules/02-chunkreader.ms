@@ -443,16 +443,23 @@ fn ReadCompressedAnimation fstream chunkEnd =
 					)
 					0x1: --ANIM_FLAVOUR_ADAPTIVE_DELTA
 					(
-						--channels[(channels.count + 1)] = ReadAnimationAdaptiveDeltaChannel fstream subChunkEnd
+						-- Deliberately not imported (roadmap decision: modders don't
+						-- author compressed anims). The old empty arm never advanced
+						-- the stream, so the next loop iteration parsed channel DATA
+						-- as chunk headers and derailed the rest of the file --
+						-- skip explicitly and record the loss.
+						if w3dSkippedContent != undefined do append w3dSkippedContent "adaptive-delta compressed animation channel -- animation not imported"
+						fseek fstream subChunkEnd #seek_set
 					)
-					--0x2: --ANIM_FLAVOUR_VALID
+					default: --unknown flavour: skip safely, never derail the parse
+					( fseek fstream subChunkEnd #seek_set )
 				)
 			)
-			--0x00000283:	--W3D_CHUNK_COMPRESSED_BIT_CHANNEL	-- channel of boolean values (e.g. visibility)
-			--(
-			--	subChunkEnd = (ftell fstream) + chunkSize
-			--	bitchannels[(bitchannels.count + 1)] = ReadCompressedAnimationBitChannel fstream subChunkEnd
-			--)
+			0x00000283:	--W3D_CHUNK_COMPRESSED_BIT_CHANNEL	-- timecoded visibility
+			(
+				if w3dSkippedContent != undefined do append w3dSkippedContent "timecoded visibility bit channel (COMPRESSED_BIT_CHANNEL) -- not imported"
+				fseek fstream chunkSize #seek_cur
+			)
 			0x00000284:	--W3D_CHUNK_COMPRESSED_ADAPTIVE_DELTA_MOTION_ANIMATION_CHANNEL
 			(
 				subChunkEnd = (ftell fstream) + chunkSize
@@ -464,7 +471,11 @@ fn ReadCompressedAnimation fstream chunkEnd =
 				(
 					0x0: --ANIM_FLAVOUR_TIMECODED
 					( channels[(channels.count + 1)] = ReadAnimationCompressedMotionChannel fstream subChunkEnd )
-
+					default: --adaptive-delta / unknown: skip safely (see 0x282 note)
+					(
+						if w3dSkippedContent != undefined do append w3dSkippedContent "adaptive-delta compressed animation channel -- animation not imported"
+						fseek fstream subChunkEnd #seek_set
+					)
 				)
 			)
 			default:
@@ -856,8 +867,15 @@ fn ReadMeshMaterialPass fstream chunkEnd=
 				subChunkEnd = (ftell fstream) + chunkSize
 				dcg = ReadMeshDCGArray fstream subChunkEnd
 			)
-			--0x0000003C:	--W3D_CHUNK_DIG	// per-vertex diffuse illumination values (array of W3dRGBStruct's)
-			--0x0000003E:	--W3D_CHUNK_SCG	// per-vertex specular color values (array of W3dRGBStruct's)
+			0x0000003C:	--W3D_CHUNK_DIG	// per-vertex diffuse illumination (baked lighting)
+			(
+				-- Not yet applied (roadmap P4: both engines multiply DIG into the
+				-- vertex color array at load) -- record the skip so the loss shows
+				-- in the import summary instead of the mesh just looking unlit.
+				if w3dSkippedContent != undefined do append w3dSkippedContent "DIG per-vertex baked lighting -- not imported (mesh may look unlit vs in-game)"
+				fseek fstream chunkSize #seek_cur
+			)
+			--0x0000003E:	--W3D_CHUNK_SCG	// per-vertex specular color values -- dead in BOTH engines (Renegade read_scg is a stub); intentionally ignored
 			0x00000048:	--W3D_CHUNK_TEXTURE_STAGE	// wrapper around a texture stage.
 			(
 				subChunkEnd = (ftell fstream) + chunkSize
@@ -937,8 +955,21 @@ fn ReadMesh fstream chunkEnd =
 			-- terrain in particular) fall through to the default arm and skip the
 			-- entire material block.
 			0x00000024: ()  -- W3D_CHUNK_PRELIT_VERTEX: descend (no-op; do not advance)
-			--0x00000025:	--W3D_CHUNK_PRELIT_LIGHTMAP_MULTI_PASS	// optional lightmapped multi-pass material chunk wrapper
-			--0x00000026:	--W3D_CHUNK_PRELIT_LIGHTMAP_MULTI_TEXTURE	// optional lightmapped multi-texture material chunk wrapper
+			-- Lightmap prelit variants are still skipped (real handling needs
+			-- lightmap textures + secondary UVs, not a wrapper descend) -- but
+			-- record the skip so the import summary surfaces the loss. Both
+			-- engines prefer these at render (shipped Renegade defaults to
+			-- PRELIT_MODE_LIGHTMAP_MULTI_PASS, ww3d.cpp:204).
+			0x00000025:	--W3D_CHUNK_PRELIT_LIGHTMAP_MULTI_PASS
+			(
+				if w3dSkippedContent != undefined do append w3dSkippedContent "lightmap prelit variant (PRELIT_LIGHTMAP_MULTI_PASS) -- baked lightmaps not imported"
+				fseek fstream chunkSize #seek_cur
+			)
+			0x00000026:	--W3D_CHUNK_PRELIT_LIGHTMAP_MULTI_TEXTURE
+			(
+				if w3dSkippedContent != undefined do append w3dSkippedContent "lightmap prelit variant (PRELIT_LIGHTMAP_MULTI_TEXTURE) -- baked lightmaps not imported"
+				fseek fstream chunkSize #seek_cur
+			)
 			0x00000028:	--W3D_CHUNK_MATERIAL_INFO	--materials information, pass count, etc (contains W3dMaterialInfoStruct)
 			(
 				matlheader = ReadMeshMaterialSetInfo fstream subChunkEnd
