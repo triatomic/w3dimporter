@@ -52,7 +52,7 @@ macroscript ImportW3D
 rollout rltMain "W3D Importer" width:177 height:314
 (
 	button btnW3DImporter "Import a file" pos:[25,17] width:127 height:36
-	button btnRenegade     "Advanced Import" pos:[25,57] width:127 height:18 tooltip:"Open a .w3d file in the advanced import dialog — inspect meshes, bones, aggregates and proxies, choose LODs and animation range, then import all or selected items."
+	button btnRenegade     "Renegade Import" pos:[25,57] width:127 height:18 tooltip:"Open a .w3d file in the Renegade import dialog — inspect meshes, bones, aggregates and proxies, choose LODs and animation range, then import all or selected items."
 
 	-- Tab strip: clicking these toggles which group of controls is visible below.
 	-- (MAXScript rollouts have no native tab control, but a radio-button strip is the

@@ -12,6 +12,7 @@ Tested on 3ds Max 2023.
 
 - [w3dimporter](#w3dimporter)
   - [Usage](#usage)
+  - [Changelog (v21.11)](#changelog-v2111)
   - [Changelog (v21.10)](#changelog-v2110)
   - [Changelog (v21.9)](#changelog-v219)
   - [Changelog (v21.8)](#changelog-v218)
@@ -90,6 +91,19 @@ If a runtime error inside an import leaves the dialog's buttons unresponsive, ty
 `w3dimporter.ms` is now generated from `modules/*.ms` by `build-w3dimporter.ps1`.
 Edit modules, not the output. Install via the drag-drop `dist/w3dimporter.mzp`,
 which adds a **W3D Tools > W3D Importer** menu. See `modules/README.md`.
+
+<details id="changelog-v2111">
+<summary><h2>Changelog (v21.11)</h2></summary>
+
+### Same-name rigid meshes no longer lose their geometry on re-export
+
+A rigid mesh whose W3D name equals the bone it rides on (common for vehicle/building parts, and for the camera-aligned sprites in files like `o_em_cross.w3d`) was imported **broken**: the bone is created first, so `w3dUniqueNodeName` suffixed the mesh node to `<name>~01`. The importer's "mesh occupies its same-named pivot" path compared the *Max node name* (`O_EM_CROSS~01`) against the pivot name (`O_EM_CROSS`), which never matched — so the mesh stayed a stray `~01`-suffixed child instead of taking over the pivot.
+
+On re-export this was destructive: `max2w3d` treats a `~` in a node name specially (it disqualifies the node from normal mesh export), so each affected mesh came back as an **empty proxy with zero vertices** and the extra `~01` nodes polluted the skeleton as bogus bones. A 2-mesh / 4-pivot file re-exported as **0 meshes / 6 pivots** — all geometry lost.
+
+The importer now compares the **original W3D mesh name** (not the suffixed Max node name), and after the mesh takes over its pivot it renames the node back to the clean W3D name (deleting the redundant bone first to free the name). Affected meshes now import with their correct names and re-export 1:1. Verified end-to-end in 3ds Max + chunk-compare: `o_em_cross` round-trips as 2 named meshes / 4 pivots (was 0 / 6). Meshes whose name differs from their bone (e.g. Renegade terrain like `blizzard.w3d`, where every mesh sits on `ROOTTRANSFORM`) never entered this path and are unaffected.
+
+</details>
 
 <details id="changelog-v2110">
 <summary><h2>Changelog (v21.10)</h2></summary>

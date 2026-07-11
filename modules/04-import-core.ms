@@ -2055,7 +2055,17 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 					(
 						if gmPivots[p] != undefined then
 						(
-							if gmMeshes[i].name == gmPivots[p].name then
+							-- Same-name rigid mesh: W3D mesh and its target bone share a name
+								-- (Renegade vehicle/building parts, and the camera-aligned sprites in
+								-- files like o_em_cross). The mesh must OCCUPY the pivot -- inherit its
+								-- transform/parent/children, delete the redundant bone -- matching how
+								-- max2w3d re-exports it. Compare the ORIGINAL W3D mesh name, not
+								-- gmMeshes[i].name: the bone is created first, so w3dUniqueNodeName
+								-- already suffixed the mesh node to "<name>~01"; comparing the Max node
+								-- name never matched, leaving the mesh a stray "~01" child that on
+								-- re-export the '~' disqualified from normal mesh export (it returned an
+								-- empty proxy, geometry lost). Match on the W3D name; rename node clean.
+								if (stricmp meshes[i].header.meshName gmPivots[p].name == 0) then
 							(
 								gmMeshes[i].parent = gmPivots[p].parent
 								gmMeshes[i].rotation = gmPivots[p].rotation  --have not to swap the line of rotation and pos, why?
@@ -2067,7 +2077,12 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 								)
 								disusedPivot = gmPivots[p]
 								gmPivots[p] = gmMeshes[i]
+								-- Delete the redundant bone FIRST to free its name, then rename
+								-- the mesh to the clean W3D name. Without freeing it first, setName
+								-- would re-suffix to "~01" and the round-trip bug would persist.
+								local _cleanNodeName = meshes[i].header.meshName
 								delete disusedPivot
+								gmMeshes[i].name = _cleanNodeName
 							)
 							else
 							(

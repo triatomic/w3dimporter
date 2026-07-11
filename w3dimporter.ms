@@ -10,7 +10,7 @@
 -- a version reads this: the rltMain window title (set in its open handler)
 -- and the cfW3DImporter debug banner. Bump it with any non-trivial logic
 -- change so the loaded copy is identifiable from the log.
-global W3DImporterVersion = "v21.10"
+global W3DImporterVersion = "v21.11"
 
 -- Reload helper: a runtime error inside cfW3DImporter can leave the rollout's
 -- event-handler thread stuck, making every button in the dialog unresponsive.
@@ -3849,7 +3849,17 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 					(
 						if gmPivots[p] != undefined then
 						(
-							if gmMeshes[i].name == gmPivots[p].name then
+							-- Same-name rigid mesh: W3D mesh and its target bone share a name
+								-- (Renegade vehicle/building parts, and the camera-aligned sprites in
+								-- files like o_em_cross). The mesh must OCCUPY the pivot -- inherit its
+								-- transform/parent/children, delete the redundant bone -- matching how
+								-- max2w3d re-exports it. Compare the ORIGINAL W3D mesh name, not
+								-- gmMeshes[i].name: the bone is created first, so w3dUniqueNodeName
+								-- already suffixed the mesh node to "<name>~01"; comparing the Max node
+								-- name never matched, leaving the mesh a stray "~01" child that on
+								-- re-export the '~' disqualified from normal mesh export (it returned an
+								-- empty proxy, geometry lost). Match on the W3D name; rename node clean.
+								if (stricmp meshes[i].header.meshName gmPivots[p].name == 0) then
 							(
 								gmMeshes[i].parent = gmPivots[p].parent
 								gmMeshes[i].rotation = gmPivots[p].rotation  --have not to swap the line of rotation and pos, why?
@@ -3861,7 +3871,12 @@ function cfW3DImporter w3dfilename splitMeshes autoBindType batch debugOutput us
 								)
 								disusedPivot = gmPivots[p]
 								gmPivots[p] = gmMeshes[i]
+								-- Delete the redundant bone FIRST to free its name, then rename
+								-- the mesh to the clean W3D name. Without freeing it first, setName
+								-- would re-suffix to "~01" and the round-trip bug would persist.
+								local _cleanNodeName = meshes[i].header.meshName
 								delete disusedPivot
+								gmMeshes[i].name = _cleanNodeName
 							)
 							else
 							(
@@ -6439,7 +6454,7 @@ macroscript ImportW3D
 rollout rltMain "W3D Importer" width:177 height:314
 (
 	button btnW3DImporter "Import a file" pos:[25,17] width:127 height:36
-	button btnRenegade     "Advanced Import" pos:[25,57] width:127 height:18 tooltip:"Open a .w3d file in the advanced import dialog — inspect meshes, bones, aggregates and proxies, choose LODs and animation range, then import all or selected items."
+	button btnRenegade     "Renegade Import" pos:[25,57] width:127 height:18 tooltip:"Open a .w3d file in the Renegade import dialog — inspect meshes, bones, aggregates and proxies, choose LODs and animation range, then import all or selected items."
 
 	-- Tab strip: clicking these toggles which group of controls is visible below.
 	-- (MAXScript rollouts have no native tab control, but a radio-button strip is the
