@@ -79,16 +79,25 @@
 			)
 			refreshStatus()
 			lblStatus.caption = if ok then "Status: installed." else "Status: install FAILED -- see Listener."
+			if ok then
+				messageBox ("W3D Importer " + (try ( ::W3DImporterVersion ) catch ( "" )) + " installed successfully.\n\nOpen it from W3D Tools > W3D Importer.") title:"W3D Importer"
+			else
+				messageBox "Install failed -- see the MAXScript Listener for details." title:"W3D Importer"
 		)
 
 		on btnUninstall pressed do
 		(
 			if (queryBox "Remove the W3D Importer?\n\n(Removes the menu entry, startup loader and installed script.\nYour W3D-Importer.ini preferences are kept.)" title:"W3D Importer") do
 			(
-				local msg = try ( w3dUninstall() ) catch ( "uninstall FAILED: " + (getCurrentException()) )
+				local failed = false
+				local msg = try ( w3dUninstall() ) catch ( failed = true; "uninstall FAILED: " + (getCurrentException()) )
 				refreshStatus()
 				lblStatus.caption = "Status: " + msg
 				lblHint.visible = false
+				if not failed then
+					messageBox ("W3D Importer uninstalled.\n\n(" + msg + ")") title:"W3D Importer"
+				else
+					messageBox "Uninstall failed -- see the MAXScript Listener for details." title:"W3D Importer"
 			)
 		)
 
