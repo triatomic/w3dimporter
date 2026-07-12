@@ -6,8 +6,9 @@ $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root "dist"; New-Item -ItemType Directory -Force -Path $dist | Out-Null
 $stage = Join-Path $root "dist\_stage"; if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
-Copy-Item (Join-Path $root "w3dimporter.ms")        (Join-Path $stage "w3dimporter.ms") -Force
-Copy-Item (Join-Path $root "packaging\mzp.run")     (Join-Path $stage "mzp.run") -Force
+Copy-Item (Join-Path $root "w3dimporter.ms")           (Join-Path $stage "w3dimporter.ms") -Force
+Copy-Item (Join-Path $root "packaging\mzp.run")        (Join-Path $stage "mzp.run") -Force
+Copy-Item (Join-Path $root "packaging\install-ui.ms")  (Join-Path $stage "install-ui.ms") -Force
 
 $zip = Join-Path $dist "w3dimporter.zip"
 $mzp = Join-Path $dist "w3dimporter.mzp"
@@ -20,7 +21,7 @@ Remove-Item -Recurse -Force $stage
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $z = [System.IO.Compression.ZipFile]::OpenRead($mzp)
 $names = $z.Entries.FullName; $z.Dispose()
-$expected = @("mzp.run","w3dimporter.ms")
+$expected = @("mzp.run","w3dimporter.ms","install-ui.ms")
 if ((($names | Sort-Object) -join ",") -ne (($expected | Sort-Object) -join ",")) {
     Write-Error "mzp root entries = $($names -join ',')  expected $($expected -join ',')"; exit 1
 }

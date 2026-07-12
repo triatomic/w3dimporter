@@ -2,4 +2,4 @@ name "W3D Importer"
 version 1
 description "W3D Importer for 3ds Max - installs the W3D Tools menu and W3D Importer tool"
 copy w3dimporter.ms to $userScripts
-drop w3dimporter.ms
+drop install-ui.ms

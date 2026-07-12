@@ -10,7 +10,7 @@
 -- a version reads this: the rltMain window title (set in its open handler)
 -- and the cfW3DImporter debug banner. Bump it with any non-trivial logic
 -- change so the loaded copy is identifiable from the log.
-global W3DImporterVersion = "v21.12"
+global W3DImporterVersion = "v21.13"
 
 -- Reload helper: a runtime error inside cfW3DImporter can leave the rollout's
 -- event-handler thread stuck, making every button in the dialog unresponsive.
@@ -7016,6 +7016,53 @@ fn w3dInstallStartupLoader =
     true
 )
 
+-- Full uninstall (v21.13). Called from the .mzp installer window
+-- (packaging/install-ui.ms). Removes what the install created; deliberately
+-- KEEPS W3D-Importer.ini (profiles/preferences survive a reinstall).
+-- Returns a short human-readable summary for the installer's status line.
+fn w3dUninstall =
+(
+	local parts = #()
+	-- menu item, and the W3D Tools menu itself if that leaves it empty
+	if menuMan != undefined do
+	(
+		local m = menuMan.findMenu "W3D Tools"
+		if m != undefined do
+		(
+			local n = w3dRemoveMenuItems m "W3D Importer"
+			if n > 0 do append parts "menu entry"
+			if m.numItems() == 0 do
+			(
+				local mainBar = menuMan.getMainMenuBar()
+				for i = mainBar.numItems() to 1 by -1 do
+				(
+					local it = mainBar.getItem i
+					if it.getTitle() == "W3D Tools" do mainBar.removeItemByPosition i
+				)
+				try ( menuMan.unRegisterMenu m ) catch ()
+				append parts "W3D Tools menu"
+			)
+			menuMan.updateMenuBar()
+		)
+	)
+	-- startup autoload stub
+	local stub = (getDir #userStartupScripts) + "\\w3dimporter-autoload.ms"
+	if doesFileExist stub do ( try ( deleteFile stub; append parts "startup loader" ) catch () )
+	-- installed script
+	local scriptCopy = (getDir #userScripts) + "\\w3dimporter.ms"
+	if doesFileExist scriptCopy do ( try ( deleteFile scriptCopy; append parts "script" ) catch () )
+	-- macroScript file (category "W3D Tools", name W3D_Importer)
+	local mcr = (getDir #userMacros) + "\\W3D Tools-W3D_Importer.mcr"
+	if doesFileExist mcr do ( try ( deleteFile mcr; append parts "macro" ) catch () )
+	if parts.count == 0 then "nothing to remove."
+	else
+	(
+		local s = "removed "
+		for i = 1 to parts.count do s += parts[i] + (if i < parts.count then ", " else ".")
+		s + " Preferences kept."
+	)
+)
+
 -- Install, then (interactive sessions only) either prompt about a legacy entry
 -- or show a one-time success notice on a genuine fresh install.
 try
@@ -7029,7 +7076,10 @@ try
         local handled = (w3dGetMigrationFlag()) != ""
         if (legacyPresent and not handled) then
             createDialog rltW3DMigrate 360 205
-        else if changed do
+        -- fresh-install notice; skipped when the .mzp installer window is
+        -- driving (install-ui.ms sets ::w3dInstallerActive) -- that window IS
+        -- the feedback, and it also reports upgrades, which this never did
+        else if changed and (::w3dInstallerActive != true) do
             messageBox ("W3D Importer " + (::W3DImporterVersion) + " installed.\n\nOpen it from W3D Tools > W3D Importer.") title:"W3D Importer"
     )
 )

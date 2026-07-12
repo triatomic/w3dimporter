@@ -12,6 +12,7 @@ Tested on 3ds Max 2023.
 
 - [w3dimporter](#w3dimporter)
   - [Usage](#usage)
+  - [Changelog (v21.13)](#changelog-v2113)
   - [Changelog (v21.12)](#changelog-v2112)
   - [Changelog (v21.11)](#changelog-v2111)
   - [Changelog (v21.10)](#changelog-v2110)
@@ -92,6 +93,21 @@ If a runtime error inside an import leaves the dialog's buttons unresponsive, ty
 `w3dimporter.ms` is now generated from `modules/*.ms` by `build-w3dimporter.ps1`.
 Edit modules, not the output. Install via the drag-drop `dist/w3dimporter.mzp`,
 which adds a **W3D Tools > W3D Importer** menu. See `modules/README.md`.
+
+<details id="changelog-v2113">
+<summary><h2>Changelog (v21.13)</h2></summary>
+
+### The .mzp now shows an installer window
+
+Dropping `w3dimporter.mzp` into a viewport used to give feedback only on a *fresh* install — upgrades installed silently, so there was no way to tell whether anything happened. The drop now opens a small **W3D Importer Setup** window showing the installed version and status, with three buttons:
+
+- **Install / Update** — (re)copies the script to `#userScripts`, reloads it, and repairs the menu entry and startup loader. Idempotent; also works if a previous copy step failed or after an uninstall in the same session.
+- **Uninstall** — removes the W3D Tools menu entry (and the menu itself if that leaves it empty), the startup autoload stub, the installed script, and the macroScript file. Your `W3D-Importer.ini` profiles/preferences are deliberately kept and survive a reinstall.
+- **Close.**
+
+The window only appears when the `.mzp` is dropped — normal Max startups still load the importer silently via the autoload stub. The old fresh-install notice is suppressed while the setup window is showing (it *is* the feedback now).
+
+</details>
 
 <details id="changelog-v2112">
 <summary><h2>Changelog (v21.12)</h2></summary>
