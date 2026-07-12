@@ -7090,7 +7090,10 @@ catch ( format "*** w3dInstallMenu failed: %\n" (getCurrentException()) )
 -- it, without forcing it on everyone. Interactive (non-quiet) sessions only.
 try
 (
-    if (not (try (GetQuietMode()) catch (false))) and (w3dGetAutoStart()) do
+    -- Also skipped while the .mzp installer window is driving
+    -- (::w3dInstallerActive): with AutoOpen=1 the installer's reload would
+    -- otherwise pop the main dialog on top of the setup window during a drop.
+    if (not (try (GetQuietMode()) catch (false))) and (w3dGetAutoStart()) and (::w3dInstallerActive != true) do
     (
         try ( destroyDialog rltMain ) catch ()
         createDialog rltMain menu:rltMainMenu

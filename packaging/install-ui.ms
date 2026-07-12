@@ -93,6 +93,10 @@
 		)
 
 		on btnClose pressed do destroyDialog rltW3DInstaller
+
+		-- fires for the X button too; re-enables the fresh-install notice and
+		-- the AutoOpen autostart that were suppressed while this window drove
+		on rltW3DInstaller close do ::w3dInstallerActive = false
 	)
 
 	-- A rollout DEFINED in a local block always binds locally, even with the
